@@ -3,146 +3,37 @@ import time
 from collections import deque
 import numpy as np
 import cv2
-import RPi.GPIO as GPIO
 import math
 import sys
 import threading
 import pygame
 from flask import Flask, Response
 
+# ==== Khởi tạo âm thanh ====
 pygame.mixer.init()
 try:
-    alert_sound = pygame.mixer.Sound("alert.wav")
+    alert_sound = pygame.mixer.Sound("/home/theo/alert.wav")
     print("Loaded alert.wav")
 except Exception as e:
     print(f"Error loading sound: {e}")
     alert_sound = None
 
+# ==== Try tflite_runtime first, else tensorflow fallback ====
 try:
     from tflite_runtime.interpreter import Interpreter
 except Exception:
     from tensorflow.lite.python.interpreter import Interpreter
 
-MODEL_PATH = "/home/theo/.cache/kagglehub/models/google/movenet/tflite/singlepose-lightning-tflite-float16/1/4.tflite"
+# ==== Config ====
+MODEL_PATH = "/home/theo/4.tflite"
 CAMERA_ID = 0
-BUZZER_PIN = 21
-NECK_THRESHOLD = 40  # Increased for better tolerance
-SMOOTHING_FRAMES = 5  # Increased to reduce noise
+INPUT_SIZE = 192
+NECK_THRESHOLD = 30
+SMOOTHING_FRAMES = 5
 BAD_DURATION_TO_ALERT = 1.2
-INFER_THREADS = 2
+INFER_THREADS = 4
 
-ALERT_COOLDOWN = 10
-ALERT_DURATION = 3
-RECOVERY_TIME = 5
-
-FRAME_SKIP = 3  # Increased to reduce lag
-RESIZE_WIDTH = 320
-JPEG_QUALITY = 70
-
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(BUZZER_PIN, GPIO.OUT)
-buzzer = GPIO.PWM(BUZZER_PIN, 1000)
-buzzer.start(0)
-
-class AlertManager:
-    def __init__(self):
-        self.state = "OK"
-        self.bad_start_time = None
-        self.alert_start_time = None
-        self.last_alert_time = None
-        self.good_start_time = None
-        self.buzzer_active = False
-        
-    def update(self, is_bad_posture):
-        current_time = time.time()
-        
-        if self.state == "OK":
-            if is_bad_posture:
-                self.bad_start_time = current_time
-                self.state = "BAD"
-                self.good_start_time = None
-                
-        elif self.state == "BAD":
-            if is_bad_posture:
-                if current_time - self.bad_start_time >= BAD_DURATION_TO_ALERT:
-                    if (self.last_alert_time is None or 
-                        current_time - self.last_alert_time >= ALERT_COOLDOWN):
-                        self.start_alert(current_time)
-            else:
-                self.state = "OK"
-                self.bad_start_time = None
-                
-        elif self.state == "ALERTING":
-            if current_time - self.alert_start_time >= ALERT_DURATION:
-                self.stop_alert()
-                self.state = "COOLDOWN"
-            else:
-                self.update_buzzer_beep(current_time)
-                
-        elif self.state == "COOLDOWN":
-            if not is_bad_posture:
-                if self.good_start_time is None:
-                    self.good_start_time = current_time
-                elif current_time - self.good_start_time >= RECOVERY_TIME:
-                    self.state = "OK"
-                    self.good_start_time = None
-            else:
-                self.good_start_time = None
-                
-    def start_alert(self, current_time):
-        self.state = "ALERTING"
-        self.alert_start_time = current_time
-        self.last_alert_time = current_time
-        
-        if alert_sound:
-            try:
-                alert_sound.play()
-            except:
-                pass
-                
-    def stop_alert(self):
-        if self.buzzer_active:
-            buzzer.ChangeDutyCycle(0)
-            self.buzzer_active = False
-            
-    def update_buzzer_beep(self, current_time):
-        cycle_time = current_time - self.alert_start_time
-        if int(cycle_time * 2) % 2 == 0:
-            if not self.buzzer_active:
-                buzzer.ChangeDutyCycle(50)
-                self.buzzer_active = True
-        else:
-            if self.buzzer_active:
-                buzzer.ChangeDutyCycle(0)
-                self.buzzer_active = False
-                
-    def get_status_info(self):
-        current_time = time.time()
-        
-        if self.state == "OK":
-            return "OK", (0, 255, 0), ""
-            
-        elif self.state == "BAD":
-            elapsed = current_time - self.bad_start_time
-            remaining = BAD_DURATION_TO_ALERT - elapsed
-            return f"Bad posture ({remaining:.1f}s)", (255, 255, 0), ""
-            
-        elif self.state == "ALERTING":
-            elapsed = current_time - self.alert_start_time
-            remaining = ALERT_DURATION - elapsed
-            return "ALERT!", (0, 0, 255), f"Alert: {remaining:.1f}s"
-            
-        elif self.state == "COOLDOWN":
-            cooldown_remaining = ALERT_COOLDOWN - (current_time - self.last_alert_time)
-            recovery_info = ""
-            if self.good_start_time:
-                recovery_elapsed = current_time - self.good_start_time
-                recovery_remaining = RECOVERY_TIME - recovery_elapsed
-                recovery_info = f" (Recovery: {recovery_remaining:.1f}s)"
-            return f"Cooldown ({cooldown_remaining:.0f}s){recovery_info}", (255, 165, 0), ""
-
-alert_manager = AlertManager()
-
+# ==== TFLite ====
 interpreter = Interpreter(MODEL_PATH, num_threads=INFER_THREADS)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
@@ -151,10 +42,10 @@ input_dtype = input_details[0]['dtype']
 in_h = input_details[0]['shape'][1]
 in_w = input_details[0]['shape'][2]
 
+# ==== Helpers ====
 def neck_angle(a, b, c):
     v1 = a - b
     v2 = c - b
-    
     denom = (np.linalg.norm(v1) * np.linalg.norm(v2))
     if denom == 0:
         return 0.0
@@ -163,111 +54,94 @@ def neck_angle(a, b, c):
     angle = math.degrees(math.acos(cosang))
     return abs(angle - 180.0)
 
+# ==== Buffers ====
 angle_buf = deque(maxlen=SMOOTHING_FRAMES)
+last_bad_time = None
+alert_playing = False
 
+# ==== Camera ====
 cap = cv2.VideoCapture(CAMERA_ID)
 if not cap.isOpened():
     print("Cannot open camera")
     sys.exit(1)
 
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESIZE_WIDTH)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 320)
-cap.set(cv2.CAP_PROP_FPS, 15)
-
+# ==== Flask ====
 app = Flask(__name__)
 outputFrame = None
 lock = threading.Lock()
-frame_counter = 0
-
-last_display_text = "Initializing..."
-last_status_text = "OK"
-last_status_color = (0, 255, 0)
-last_extra_info = ""
 
 def detect_posture():
-    global outputFrame, frame_counter, last_display_text, last_status_text, last_status_color, last_extra_info
+    global outputFrame, last_bad_time, alert_playing
     while True:
         ret, frame = cap.read()
         if not ret:
             continue
-        
-        frame_counter += 1
-        skip_frame = (frame_counter % FRAME_SKIP != 0)
+        h, w, _ = frame.shape
 
-        h, w = frame.shape[:2]
-        if w > RESIZE_WIDTH:
-            frame = cv2.resize(frame, (RESIZE_WIDTH, int(h * RESIZE_WIDTH / w)))
-            h, w = frame.shape[:2]
+        # prepare input
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img_resized = cv2.resize(img, (in_w, in_h))
+        if input_dtype == np.float32:
+            inp = np.expand_dims(img_resized.astype(np.float32), axis=0)
+            inp = (inp - 127.5) / 127.5
+        else:
+            inp = np.expand_dims(img_resized.astype(input_dtype), axis=0)
 
-        if not skip_frame:
-            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img_resized = cv2.resize(img, (in_w, in_h))
-            
-            if input_dtype == np.float32:
-                inp = np.expand_dims(img_resized.astype(np.float32), axis=0)
-                inp = (inp - 127.5) / 127.5
+        interpreter.set_tensor(input_details[0]['index'], inp)
+        interpreter.invoke()
+        output_data = interpreter.get_tensor(output_details[0]['index'])
+
+        kpts = output_data[0][0] if output_data.ndim == 4 else output_data[0]
+        print("Confidences:", [round(k[2], 3) for k in kpts])
+
+        # draw keypoints
+        for (y, x, score) in kpts:
+            if score > 0.2:
+                cv2.circle(frame, (int(x * w), int(y * h)), 3, (0, 0, 255), -1)
+
+        def kp(i):
+            y, x, score = kpts[i]
+            return np.array([x * w, y * h]), score
+
+        idx = {'nose': 0, 'ls': 5, 'rs': 6, 'lh': 11, 'rh': 12}
+        nose, s0 = kp(idx['nose'])
+        ls, s1 = kp(idx['ls'])
+        rs, s2 = kp(idx['rs'])
+        lh, s3 = kp(idx['lh'])
+        rh, s4 = kp(idx['rh'])
+
+        min_conf = 0.2
+        scores = [s0, s1, s2, s3, s4]
+
+        if sum(s > min_conf for s in scores) < 3:
+            display_text = "No person / low confidence"
+        else:
+            mid_shoulder = (ls + rs) / 2.0
+            mid_hip = (lh + rh) / 2.0
+            angle_val = neck_angle(mid_hip, mid_shoulder, nose)
+            angle_buf.append(angle_val)
+            smoothed = float(np.mean(angle_buf))
+            display_text = f"neck: {smoothed:.1f} deg"
+
+            if smoothed > NECK_THRESHOLD:
+                if last_bad_time is None:
+                    last_bad_time = time.time()
+                elapsed = time.time() - last_bad_time
+                if elapsed >= BAD_DURATION_TO_ALERT:
+                    if not alert_playing and alert_sound:
+                        alert_sound.play()
+                        alert_playing = True
             else:
-                inp = np.expand_dims(img_resized.astype(input_dtype), axis=0)
+                last_bad_time = None
+                alert_playing = False
 
-            interpreter.set_tensor(input_details[0]['index'], inp)
-            interpreter.invoke()
-            output_data = interpreter.get_tensor(output_details[0]['index'])
+        # overlay text
+        cv2.putText(frame, display_text, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-            kpts = output_data[0][0] if output_data.ndim == 4 else output_data[0]
-
-            for (y, x, score) in kpts:
-                if score > 0.3:
-                    cv2.circle(frame, (int(x * w), int(y * h)), 2, (0, 0, 255), -1)
-
-            def kp(i):
-                y, x, score = kpts[i]
-                return np.array([x * w, y * h]), score
-
-            idx = {'nose': 0, 'ls': 5, 'rs': 6, 'lh': 11, 'rh': 12}
-            
-            try:
-                nose, s0 = kp(idx['nose'])
-                ls, s1 = kp(idx['ls'])
-                rs, s2 = kp(idx['rs'])
-                lh, s3 = kp(idx['lh'])
-                rh, s4 = kp(idx['rh'])
-
-                min_conf = 0.3
-                scores = [s0, s1, s2, s3, s4]
-
-                if sum(s > min_conf for s in scores) < 3:
-                    last_display_text = "Low confidence"
-                    alert_manager.update(False)
-                else:
-                    mid_shoulder = (ls + rs) / 2.0
-                    mid_hip = (lh + rh) / 2.0
-                    angle_val = neck_angle(mid_hip, mid_shoulder, nose)
-                    angle_buf.append(angle_val)
-                    smoothed = float(np.mean(angle_buf))
-                    last_display_text = f"Neck: {smoothed:.1f}°"
-                    print(f"Smoothed angle: {smoothed:.1f}")  # Added for debug
-
-                    is_bad_posture = smoothed > NECK_THRESHOLD
-                    alert_manager.update(is_bad_posture)
-
-                last_status_text, last_status_color, last_extra_info = alert_manager.get_status_info()
-
-            except Exception as e:
-                last_display_text = "Processing error"
-                alert_manager.update(False)
-
-        cv2.putText(frame, last_display_text, (5, 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        cv2.putText(frame, last_status_text, (5, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, last_status_color, 2)
-                        
-        if last_extra_info:
-            cv2.putText(frame, last_extra_info, (5, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-
+        # update global frame
         with lock:
-            outputFrame = frame
+            outputFrame = frame.copy()
 
 def generate():
     global outputFrame, lock
@@ -275,8 +149,7 @@ def generate():
         with lock:
             if outputFrame is None:
                 continue
-            (flag, encodedImage) = cv2.imencode(".jpg", outputFrame, 
-                                              [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            (flag, encodedImage) = cv2.imencode(".jpg", outputFrame)
             if not flag:
                 continue
         yield (b'--frame\r\n'
@@ -292,43 +165,16 @@ def video_feed():
 def index():
     return """
     <html>
-      <head>
-        <title>Smart Posture Monitor</title>
-        <style>
-          body { margin: 0; padding: 10px; background: #222; color: white; font-family: Arial; }
-          img { width: 100%; height: 500px; object-fit: contain; border: 2px solid #444; }
-          .info { margin-top: 10px; padding: 10px; background: #333; border-radius: 5px; }
-        </style>
-      </head>
-      <body>
-        <h3>Smart Posture Monitor</h3>
-        <img src="/video_feed"/>
-        <div class="info">
-          <h4>How it works:</h4>
-          <p>• Measures the angle between hips, shoulders, and nose</p>
-          <p>• Good posture: angle close to 180° (straight line)</p>
-          <p>• Bad posture: angle deviation > 40°</p>
-          <p>• Alert triggers after 1.2 seconds of bad posture</p>
-          <p>• Cooldown: 10 seconds between alerts</p>
-          <p>• Recovery: keep good posture for 5 seconds to reset</p>
-        </div>
+      <head><title>Posture Monitor</title></head>
+      <body style="background-color:#222;color:white;font-family:Arial;">
+        <h2>Posture Camera Stream</h2>
+        <img src="/video_feed" width="640" height="480" />
       </body>
     </html>
-"""
-
-def cleanup():
-    alert_manager.stop_alert()
-    buzzer.stop()
-    GPIO.cleanup()
-    cap.release()
+    """
 
 if __name__ == '__main__':
-    try:
-        t = threading.Thread(target=detect_posture)
-        t.daemon = True
-        t.start()
-        app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        cleanup()
+    t = threading.Thread(target=detect_posture)
+    t.daemon = True
+    t.start()
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False)
