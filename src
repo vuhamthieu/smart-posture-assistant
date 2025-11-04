@@ -6,16 +6,23 @@ import cv2
 import math
 import sys
 import threading
-import pygame
 from flask import Flask, Response, jsonify
+from gtts import gTTS
+import tempfile
+import os
+import subprocess
 
-pygame.mixer.init()
-try:
-    alert_sound = pygame.mixer.Sound("/home/theo/alert.wav")
-    print("Loaded alert.wav")
-except Exception as e:
-    print(f"Error loading sound: {e}")
-    alert_sound = None
+def init_audio():
+    """Test if audio output works"""
+    try:
+        subprocess.run(['amixer', 'set', 'Master', '80%'], check=False)
+        print("Audio initialized")
+        return True
+    except:
+        print("Audio setup failed")
+        return False
+
+audio_available = init_audio()
 
 try:
     from tflite_runtime.interpreter import Interpreter
@@ -26,7 +33,7 @@ MODEL_PATH = "/home/theo/4.tflite"
 CAMERA_ID = 0
 NECK_THRESHOLD = 35
 SMOOTHING_FRAMES = 7
-BAD_DURATION_TO_ALERT = 1.5
+BAD_DURATION_TO_ALERT = 2.0
 INFER_THREADS = 2
 
 FACE_TOO_CLOSE_RATIO = 0.35
@@ -52,9 +59,35 @@ def neck_angle(hip, shoulder, head, shoulder_ref):
     angle = math.degrees(math.acos(cosang))
     return abs(angle - 180.0)
 
+def speak_alert(message):
+    """Speak alert in Vietnamese using gTTS"""
+    if not audio_available:
+        return
+    
+    def _speak():
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
+                temp_file = fp.name
+            
+            tts = gTTS(text=message, lang='vi', slow=False)
+            tts.save(temp_file)
+            
+            subprocess.run(['mpg123', '-q', temp_file], check=False)
+            
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+        except Exception as e:
+            print(f"TTS error: {e}")
+    
+    thread = threading.Thread(target=_speak, daemon=True)
+    thread.start()
+
 angle_buf = deque(maxlen=SMOOTHING_FRAMES)
 last_bad_time = None
 alert_playing = False
+last_alert_time = 0
 
 cap = cv2.VideoCapture(CAMERA_ID)
 if not cap.isOpened():
@@ -81,9 +114,17 @@ last_display_text = ""
 last_distance_status = "OK"
 last_fps_text = ""
 
+ALERT_MESSAGES = [
+    "Bạn đang cúi đầu quá thấp, hãy ngồi thẳng lại",
+    "Tư thế ngồi của bạn không đúng, giữ thẳng lưng nhé",
+    "Hãy giữ đầu thẳng với cột sống"
+]
+alert_index = 0
+
 def detect_posture():
     global outputFrame, last_bad_time, alert_playing, stats
     global last_display_text, last_distance_status, last_fps_text
+    global last_alert_time, alert_index
     
     frame_count = 0
     start_time = time.time()
@@ -141,6 +182,10 @@ def detect_posture():
             
             if face_ratio > FACE_TOO_CLOSE_RATIO:
                 distance_status = "TOO CLOSE"
+                current_time = time.time()
+                if current_time - last_alert_time > 15:
+                    speak_alert("Bạn đang ngồi quá gần màn hình, hãy lùi ra xa một chút")
+                    last_alert_time = current_time
             elif face_ratio < FACE_TOO_FAR_RATIO:
                 distance_status = "Too far"
 
@@ -173,8 +218,11 @@ def detect_posture():
                     last_bad_time = time.time()
                 elapsed = time.time() - last_bad_time
                 if elapsed >= BAD_DURATION_TO_ALERT:
-                    if not alert_playing and alert_sound:
-                        alert_sound.play()
+                    current_time = time.time()
+                    if current_time - last_alert_time > 10:
+                        speak_alert(ALERT_MESSAGES[alert_index])
+                        alert_index = (alert_index + 1) % len(ALERT_MESSAGES)
+                        last_alert_time = current_time
                         alert_playing = True
             else:
                 posture_status = "Good"
@@ -348,23 +396,23 @@ def index():
       </head>
       <body>
         <div class="container">
-          <h1>Posture Monitor</h1>
+          <h1>Trợ Lý Tư Thế Ngồi</h1>
           <div class="content">
             <div class="video-container">
               <img src="/video_feed" />
             </div>
             <div class="stats-panel">
-              <h2 style="margin-top:0; color:#00ff88;">Live Stats</h2>
+              <h2 style="margin-top:0; color:#00ff88;">Thống Kê</h2>
               <div class="stat-item">
-                <div class="stat-label">Posture Status</div>
+                <div class="stat-label">Tư Thế</div>
                 <div class="stat-value" id="posture">-</div>
               </div>
               <div class="stat-item">
-                <div class="stat-label">Neck Angle</div>
+                <div class="stat-label">Góc Cổ</div>
                 <div class="stat-value" id="angle">-</div>
               </div>
               <div class="stat-item">
-                <div class="stat-label">Screen Distance</div>
+                <div class="stat-label">Khoảng Cách</div>
                 <div class="stat-value" id="distance">-</div>
               </div>
               <div class="stat-item">
@@ -372,12 +420,13 @@ def index():
                 <div class="stat-value" id="fps">-</div>
               </div>
               <div class="info">
-                <strong>Posture Guidelines:</strong><br>
-                • Good: neck angle under 35°<br>
-                • Keep your back straight<br>
-                • Head aligned with spine<br>
-                • Maintain proper screen distance<br>
-                • Take breaks every 20 minutes
+                <strong>Hướng Dẫn:</strong><br>
+                • Tốt: góc cổ dưới 35°<br>
+                • Giữ lưng thẳng<br>
+                • Đầu thẳng hàng với cột sống<br>
+                • Giữ khoảng cách phù hợp<br>
+                • Cảnh báo bằng giọng nói tiếng Việt<br>
+                • Nghỉ ngơi mỗi 20 phút
               </div>
             </div>
           </div>
@@ -387,8 +436,8 @@ def index():
     """
 
 if __name__ == '__main__':
-    print("Starting Posture Monitor...")
-    print("Access at: http://localhost:5000")
+    print("Khởi động Trợ Lý Tư Thế với Giọng Nói Tiếng Việt...")
+    print("Truy cập tại: http://localhost:5000")
     
     t = threading.Thread(target=detect_posture)
     t.daemon = True
