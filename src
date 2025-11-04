@@ -24,14 +24,11 @@ except Exception:
 
 MODEL_PATH = "/home/theo/4.tflite"
 CAMERA_ID = 0
-INPUT_SIZE = 192
-NECK_THRESHOLD = 30
-SMOOTHING_FRAMES = 5
-BAD_DURATION_TO_ALERT = 1.2
+NECK_THRESHOLD = 35
+SMOOTHING_FRAMES = 7
+BAD_DURATION_TO_ALERT = 1.5
 INFER_THREADS = 2
 
-EYE_AR_THRESH = 0.25
-EYE_AR_CONSEC_FRAMES = 3
 FACE_TOO_CLOSE_RATIO = 0.35
 FACE_TOO_FAR_RATIO = 0.08
 
@@ -43,33 +40,21 @@ input_dtype = input_details[0]['dtype']
 in_h = input_details[0]['shape'][1]
 in_w = input_details[0]['shape'][2]
 
-def neck_angle(a, b, c):
-    v1 = a - b
-    v2 = c - b
-    denom = (np.linalg.norm(v1) * np.linalg.norm(v2))
+def neck_angle(hip, shoulder, head, shoulder_ref):
+    """Calculate neck angle similar to MediaPipe method"""
+    vec1 = hip - shoulder_ref
+    vec2 = head - shoulder_ref
+    denom = (np.linalg.norm(vec1) * np.linalg.norm(vec2))
     if denom == 0:
         return 0.0
-    cosang = np.dot(v1, v2) / denom
+    cosang = np.dot(vec1, vec2) / denom
     cosang = np.clip(cosang, -1.0, 1.0)
     angle = math.degrees(math.acos(cosang))
     return abs(angle - 180.0)
 
-def estimate_face_size(nose, left_ear, right_ear, frame_width):
-    if left_ear is not None and right_ear is not None:
-        face_width = np.linalg.norm(left_ear - right_ear)
-    else:
-        face_width = frame_width * 0.15
-    face_ratio = face_width / frame_width
-    return face_ratio
-
 angle_buf = deque(maxlen=SMOOTHING_FRAMES)
-ear_buf = deque(maxlen=3)
 last_bad_time = None
 alert_playing = False
-
-total_blinks = 0
-last_blink_time = 0
-eyes_closed_frames = 0
 
 cap = cv2.VideoCapture(CAMERA_ID)
 if not cap.isOpened():
@@ -87,17 +72,18 @@ lock = threading.Lock()
 
 stats = {
     'posture_status': 'Good',
-    'blink_rate': 0,
+    'neck_angle': 0,
     'distance_status': 'OK',
-    'eye_status': 'Open'
+    'fps': 0
 }
 
-draw_counter = 0
+last_display_text = ""
+last_distance_status = "OK"
+last_fps_text = ""
 
 def detect_posture():
-    global outputFrame, last_bad_time, alert_playing
-    global total_blinks, last_blink_time, eyes_closed_frames
-    global stats, draw_counter
+    global outputFrame, last_bad_time, alert_playing, stats
+    global last_display_text, last_distance_status, last_fps_text
     
     frame_count = 0
     start_time = time.time()
@@ -108,15 +94,15 @@ def detect_posture():
             continue
         
         frame_count += 1
-        
         h, w, _ = frame.shape
 
         img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img_resized = cv2.resize(img, (in_w, in_h), interpolation=cv2.INTER_NEAREST)
         
         if input_dtype == np.float32:
-            inp = np.expand_dims(img_resized.astype(np.float32), axis=0)
+            inp = img_resized.astype(np.float32)
             inp = (inp - 127.5) / 127.5
+            inp = np.expand_dims(inp, axis=0)
         else:
             inp = np.expand_dims(img_resized.astype(input_dtype), axis=0)
 
@@ -126,55 +112,32 @@ def detect_posture():
 
         kpts = output_data[0][0] if output_data.ndim == 4 else output_data[0]
 
-        def kp(i):
-            y, x, score = kpts[i]
-            return np.array([x * w, y * h]), score
-
-        idx = {
-            'nose': 0, 'le': 1, 're': 2,
-            'lear': 3, 'rear': 4,
-            'ls': 5, 'rs': 6,
-            'lh': 11, 'rh': 12
-        }
-        
-        nose, s0 = kp(idx['nose'])
-        le, s_le = kp(idx['le'])
-        re, s_re = kp(idx['re'])
-        lear, s_lear = kp(idx['lear'])
-        rear, s_rear = kp(idx['rear'])
-        ls, s1 = kp(idx['ls'])
-        rs, s2 = kp(idx['rs'])
-        lh, s3 = kp(idx['lh'])
-        rh, s4 = kp(idx['rh'])
+        nose = np.array([kpts[0][1] * w, kpts[0][0] * h])
+        s0 = kpts[0][2]
+        lear = np.array([kpts[3][1] * w, kpts[3][0] * h])
+        s_lear = kpts[3][2]
+        rear = np.array([kpts[4][1] * w, kpts[4][0] * h])
+        s_rear = kpts[4][2]
+        ls = np.array([kpts[5][1] * w, kpts[5][0] * h])
+        s1 = kpts[5][2]
+        rs = np.array([kpts[6][1] * w, kpts[6][0] * h])
+        s2 = kpts[6][2]
+        lh = np.array([kpts[11][1] * w, kpts[11][0] * h])
+        s3 = kpts[11][2]
+        rh = np.array([kpts[12][1] * w, kpts[12][0] * h])
+        s4 = kpts[12][2]
 
         min_conf = 0.25
         key_scores = [s0, s1, s2, s3, s4]
         
-        eye_status = "Open"
-        if s_le > min_conf and s_re > min_conf:
-            eye_distance = np.linalg.norm(le - re)
-            nose_to_eyes = (np.linalg.norm(nose - le) + np.linalg.norm(nose - re)) / 2
-            
-            if eye_distance > 0 and nose_to_eyes > 0:
-                ear_estimate = eye_distance / nose_to_eyes
-                ear_buf.append(ear_estimate)
-                avg_ear = np.mean(ear_buf)
-                
-                if avg_ear < 0.35:
-                    eyes_closed_frames += 1
-                    if eyes_closed_frames >= EYE_AR_CONSEC_FRAMES:
-                        eye_status = "Closed"
-                else:
-                    if eyes_closed_frames >= EYE_AR_CONSEC_FRAMES:
-                        total_blinks += 1
-                        last_blink_time = time.time()
-                    eyes_closed_frames = 0
-
         distance_status = "OK"
         if s0 > min_conf:
-            left_ear_pos = lear if s_lear > min_conf else None
-            right_ear_pos = rear if s_rear > min_conf else None
-            face_ratio = estimate_face_size(nose, left_ear_pos, right_ear_pos, w)
+            if s_lear > min_conf and s_rear > min_conf:
+                face_width = np.linalg.norm(lear - rear)
+            else:
+                face_width = w * 0.15
+            
+            face_ratio = face_width / w
             
             if face_ratio > FACE_TOO_CLOSE_RATIO:
                 distance_status = "TOO CLOSE"
@@ -184,15 +147,27 @@ def detect_posture():
         if sum(s > min_conf for s in key_scores) < 3:
             posture_status = "Unknown"
             smoothed = 0
+            display_text = "No person"
         else:
-            mid_shoulder = (ls + rs) / 2.0
-            mid_hip = (lh + rh) / 2.0
-            angle_val = neck_angle(mid_hip, mid_shoulder, nose)
+            mid_shoulder = (ls + rs) * 0.5
+            mid_hip = (lh + rh) * 0.5
+            
+            if s_lear > min_conf and s_rear > min_conf:
+                mid_head = (lear + rear) * 0.5
+            else:
+                mid_head = nose - np.array([0, np.linalg.norm(ls - rs) * 0.4])
+            
+            angle_val = neck_angle(mid_hip, mid_shoulder, mid_head, mid_shoulder)
             angle_buf.append(angle_val)
             smoothed = float(np.mean(angle_buf))
             
+            if frame_count % 2 == 0:
+                cv2.line(frame, tuple(mid_hip.astype(int)), tuple(mid_shoulder.astype(int)), (0, 255, 0), 2)
+                cv2.line(frame, tuple(mid_shoulder.astype(int)), tuple(mid_head.astype(int)), (0, 255, 0), 2)
+            
             if smoothed > NECK_THRESHOLD:
                 posture_status = "Bad"
+                display_text = f"BAD POSTURE: {smoothed:.1f}deg"
                 
                 if last_bad_time is None:
                     last_bad_time = time.time()
@@ -203,61 +178,52 @@ def detect_posture():
                         alert_playing = True
             else:
                 posture_status = "Good"
+                display_text = f"GOOD: {smoothed:.1f}deg"
                 last_bad_time = None
                 alert_playing = False
 
         elapsed_time = time.time() - start_time
-        blink_rate = (total_blinks / elapsed_time) * 60 if elapsed_time > 0 else 0
         fps = frame_count / elapsed_time if elapsed_time > 0 else 0
 
-        draw_counter += 1
-        if draw_counter % 3 == 0:
-            if posture_status == "Bad":
-                cv2.putText(frame, f"BAD: {smoothed:.1f}deg", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            elif posture_status == "Good":
-                cv2.putText(frame, f"GOOD: {smoothed:.1f}deg", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            else:
-                cv2.putText(frame, "No person", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            y_offset = 70
-            cv2.putText(frame, f"Eyes: {eye_status}", (10, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            cv2.putText(frame, f"Blinks: {total_blinks} ({blink_rate:.1f}/min)", (10, y_offset+22),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            cv2.putText(frame, f"Distance: {distance_status}", (10, y_offset+44),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            
-            cv2.putText(frame, f"FPS: {fps:.1f}", (w-100, 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            
-            if distance_status == "TOO CLOSE":
-                cv2.putText(frame, "Move back!", (w//2-70, 50),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            elif distance_status == "Too far":
-                cv2.putText(frame, "Move closer", (w//2-70, 50),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            
-            if s_le > min_conf and s_re > min_conf:
-                cv2.line(frame, tuple(le.astype(int)), tuple(re.astype(int)), (255, 0, 255), 1)
-            
-            if posture_status != "Unknown":
-                mid_shoulder = (ls + rs) / 2.0
-                mid_hip = (lh + rh) / 2.0
-                cv2.line(frame, tuple(mid_hip.astype(int)), tuple(mid_shoulder.astype(int)), (0, 255, 0), 1)
-                cv2.line(frame, tuple(mid_shoulder.astype(int)), tuple(nose.astype(int)), (0, 255, 0), 1)
+        if display_text != last_display_text:
+            last_display_text = display_text
+        if distance_status != last_distance_status:
+            last_distance_status = distance_status
+        if frame_count % 5 == 0:
+            last_fps_text = f"FPS: {fps:.1f}"
+
+        if posture_status == "Bad":
+            cv2.putText(frame, last_display_text, (10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        elif posture_status == "Good":
+            cv2.putText(frame, last_display_text, (10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        else:
+            cv2.putText(frame, last_display_text, (10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        
+        cv2.putText(frame, f"Distance: {last_distance_status}", (10, 80),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        
+        cv2.putText(frame, last_fps_text, (w-120, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        if last_distance_status == "TOO CLOSE":
+            cv2.putText(frame, "Move back from screen!", (w//2-140, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        elif last_distance_status == "Too far":
+            cv2.putText(frame, "Move closer to screen", (w//2-130, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         stats.update({
             'posture_status': posture_status,
-            'blink_rate': f"{blink_rate:.1f}",
+            'neck_angle': f"{smoothed:.1f}",
             'distance_status': distance_status,
-            'eye_status': eye_status
+            'fps': f"{fps:.1f}"
         })
 
         with lock:
-            outputFrame = frame.copy()
+            outputFrame = frame
 
 def generate():
     global outputFrame, lock
@@ -266,10 +232,12 @@ def generate():
             if outputFrame is None:
                 time.sleep(0.01)
                 continue
-            (flag, encodedImage) = cv2.imencode(".jpg", outputFrame, 
-                                                [cv2.IMWRITE_JPEG_QUALITY, 60])
-            if not flag:
-                continue
+            frame = outputFrame
+        
+        (flag, encodedImage) = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 55])
+        if not flag:
+            continue
+        
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' +
                bytearray(encodedImage) + b'\r\n')
@@ -288,7 +256,7 @@ def index():
     return """
     <html>
       <head>
-        <title>Posture + Eye Tracking Monitor</title>
+        <title>Posture Monitor</title>
         <style>
           body {
             background-color: #1a1a1a;
@@ -341,7 +309,7 @@ def index():
             margin-bottom: 5px;
           }
           .stat-value {
-            font-size: 20px;
+            font-size: 24px;
             font-weight: bold;
             color: #00ff88;
           }
@@ -353,6 +321,9 @@ def index():
             font-size: 14px;
             color: #aaa;
           }
+          .good { color: #00ff88 !important; }
+          .bad { color: #ff4444 !important; }
+          .warning { color: #ff8800 !important; }
         </style>
         <script>
           function updateStats() {
@@ -360,14 +331,15 @@ def index():
               .then(r => r.json())
               .then(data => {
                 document.getElementById('posture').textContent = data.posture_status;
-                document.getElementById('eyes').textContent = data.eye_status;
-                document.getElementById('blinks').textContent = data.blink_rate;
+                document.getElementById('angle').textContent = data.neck_angle + '°';
                 document.getElementById('distance').textContent = data.distance_status;
+                document.getElementById('fps').textContent = data.fps;
                 
-                document.getElementById('posture').style.color = 
-                  data.posture_status === 'Good' ? '#00ff88' : '#ff4444';
-                document.getElementById('distance').style.color = 
-                  data.distance_status === 'OK' ? '#00ff88' : '#ff8800';
+                const postureEl = document.getElementById('posture');
+                postureEl.className = 'stat-value ' + (data.posture_status === 'Good' ? 'good' : 'bad');
+                
+                const distanceEl = document.getElementById('distance');
+                distanceEl.className = 'stat-value ' + (data.distance_status === 'OK' ? 'good' : 'warning');
               });
           }
           setInterval(updateStats, 1000);
@@ -376,7 +348,7 @@ def index():
       </head>
       <body>
         <div class="container">
-          <h1>Posture + Eye Tracking Monitor</h1>
+          <h1>Posture Monitor</h1>
           <div class="content">
             <div class="video-container">
               <img src="/video_feed" />
@@ -388,23 +360,24 @@ def index():
                 <div class="stat-value" id="posture">-</div>
               </div>
               <div class="stat-item">
-                <div class="stat-label">Eye Status</div>
-                <div class="stat-value" id="eyes">-</div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-label">Blink Rate (per min)</div>
-                <div class="stat-value" id="blinks">-</div>
+                <div class="stat-label">Neck Angle</div>
+                <div class="stat-value" id="angle">-</div>
               </div>
               <div class="stat-item">
                 <div class="stat-label">Screen Distance</div>
                 <div class="stat-value" id="distance">-</div>
               </div>
+              <div class="stat-item">
+                <div class="stat-label">FPS</div>
+                <div class="stat-value" id="fps">-</div>
+              </div>
               <div class="info">
-                <strong>Tips:</strong><br>
-                Normal blink rate: 15-20/min<br>
-                Keep neck angle under 30 degrees<br>
-                Maintain proper distance<br>
-                Take breaks every 20 mins
+                <strong>Posture Guidelines:</strong><br>
+                • Good: neck angle under 35°<br>
+                • Keep your back straight<br>
+                • Head aligned with spine<br>
+                • Maintain proper screen distance<br>
+                • Take breaks every 20 minutes
               </div>
             </div>
           </div>
@@ -414,7 +387,7 @@ def index():
     """
 
 if __name__ == '__main__':
-    print("Starting Posture + Eye Tracking Monitor...")
+    print("Starting Posture Monitor...")
     print("Access at: http://localhost:5000")
     
     t = threading.Thread(target=detect_posture)
