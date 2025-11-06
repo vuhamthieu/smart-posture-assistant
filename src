@@ -11,15 +11,36 @@ from gtts import gTTS
 import tempfile
 import os
 import subprocess
+from PIL import Image, ImageDraw
+from board import SCL, SDA
+import busio
+from adafruit_ssd1306 import SSD1306_I2C
+import RPi.GPIO as GPIO
+from rpi_ws281x import PixelStrip, Color
 
 def init_audio():
-    """Test if audio output works"""
+    """Initialize I2S audio for MAX98357A"""
     try:
-        subprocess.run(['amixer', 'set', 'Master', '80%'], check=False)
-        print("Audio initialized")
+        # Check if I2S is enabled
+        result = subprocess.run(['aplay', '-l'], capture_output=True, text=True)
+        if 'I2S' not in result.stdout and 'bcm2835' not in result.stdout:
+            print("WARNING: I2S may not be enabled!")
+            print("Enable I2S: Add 'dtoverlay=hifiberry-dac' to /boot/config.txt")
+        
+        # Set volume
+        subprocess.run(['amixer', 'set', 'Master', '100%'], check=False, capture_output=True)
+        subprocess.run(['amixer', 'set', 'PCM', '100%'], check=False, capture_output=True)
+        
+        # Check mpg123
+        result = subprocess.run(['which', 'mpg123'], capture_output=True)
+        if result.returncode != 0:
+            print("mpg123 not found! Install: sudo apt-get install mpg123")
+            return False
+        
+        print("I2S Audio initialized for MAX98357A")
         return True
-    except:
-        print("Audio setup failed")
+    except Exception as e:
+        print(f"Audio setup failed: {e}")
         return False
 
 audio_available = init_audio()
@@ -39,6 +60,24 @@ INFER_THREADS = 2
 FACE_TOO_CLOSE_RATIO = 0.35
 FACE_TOO_FAR_RATIO = 0.08
 
+LED_COUNT = 12
+LED_PIN = 13
+LED_BRIGHTNESS = 80
+LED_FREQ_HZ = 800000
+LED_DMA = 10
+LED_INVERT = False
+LED_CHANNEL = 0
+
+# MAX98357A I2S Audio Amplifier:
+# LRC (WS)   -> GPIO 19 (Pin 35)
+# BCLK       -> GPIO 18 (Pin 12)
+# DIN (Data) -> GPIO 21 (Pin 40)
+# VIN -> 5V, GND -> GND
+
+# LED Ring WS2812B:
+# DIN -> GPIO 13 (Pin 33 - PWM1)
+# VCC -> 5V external, GND -> GND (common with Pi)
+
 interpreter = Interpreter(MODEL_PATH, num_threads=INFER_THREADS)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
@@ -46,6 +85,165 @@ output_details = interpreter.get_output_details()
 input_dtype = input_details[0]['dtype']
 in_h = input_details[0]['shape'][1]
 in_w = input_details[0]['shape'][2]
+
+try:
+    i2c = busio.I2C(SCL, SDA)
+    oled = SSD1306_I2C(128, 64, i2c)
+    oled.fill(0)
+    oled.show()
+    print("OLED initialized")
+except Exception as e:
+    print(f"OLED init failed: {e}")
+    oled = None
+
+try:
+    strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
+    strip.begin()
+    for i in range(LED_COUNT):
+        strip.setPixelColor(i, Color(0, 0, 0))
+    strip.show()
+    print("LED Ring initialized")
+except Exception as e:
+    print(f"LED init failed: {e}")
+    strip = None
+
+class FaceDisplay:
+    def __init__(self, oled_display):
+        self.oled = oled_display
+        self.current_state = "normal"
+        
+    def draw_normal_face(self):
+        """Draw normal/happy face"""
+        if not self.oled:
+            return
+        
+        image = Image.new("1", (128, 64))
+        draw = ImageDraw.Draw(image)
+        
+        draw.ellipse((30, 15, 50, 35), outline=255, fill=0)
+        draw.ellipse((35, 20, 45, 30), outline=255, fill=255)
+        
+        draw.ellipse((78, 15, 98, 35), outline=255, fill=0)
+        draw.ellipse((83, 20, 93, 30), outline=255, fill=255)
+        
+        draw.arc((40, 35, 88, 55), 0, 180, fill=255, width=2)
+        
+        self.oled.image(image)
+        self.oled.show()
+        self.current_state = "normal"
+    
+    def draw_angry_face(self):
+        """Draw angry face"""
+        if not self.oled:
+            return
+        
+        image = Image.new("1", (128, 64))
+        draw = ImageDraw.Draw(image)
+        
+        draw.line((25, 15, 45, 20), fill=255, width=2)
+        draw.ellipse((30, 18, 50, 38), outline=255, fill=0)
+        draw.ellipse((35, 23, 45, 33), outline=255, fill=255)
+        
+        draw.line((83, 20, 103, 15), fill=255, width=2)
+        draw.ellipse((78, 18, 98, 38), outline=255, fill=0)
+        draw.ellipse((83, 23, 93, 33), outline=255, fill=255)
+        
+        draw.arc((40, 45, 88, 58), 180, 360, fill=255, width=2)
+        
+        self.oled.image(image)
+        self.oled.show()
+        self.current_state = "angry"
+    
+    def blink(self):
+        """Blink eyes (close briefly)"""
+        if not self.oled:
+            return
+        
+        image = Image.new("1", (128, 64))
+        draw = ImageDraw.Draw(image)
+        
+        draw.line((30, 25, 50, 25), fill=255, width=2)
+        draw.line((78, 25, 98, 25), fill=255, width=2)
+        
+        if self.current_state == "normal":
+            draw.arc((40, 35, 88, 55), 0, 180, fill=255, width=2)
+        else:
+            draw.arc((40, 45, 88, 58), 180, 360, fill=255, width=2)
+        
+        self.oled.image(image)
+        self.oled.show()
+
+class LEDController:
+    def __init__(self, led_strip):
+        self.strip = led_strip
+        self.current_color = (255, 200, 0)
+        self.is_blinking = False
+        self.lock = threading.Lock()
+        
+    def set_color(self, r, g, b):
+        """Set all LEDs to one color - RGB order"""
+        if not self.strip:
+            return
+        with self.lock:
+            for i in range(LED_COUNT):
+                self.strip.setPixelColor(i, Color(g, r, b))
+            self.strip.show()
+            self.current_color = (r, g, b)
+    
+    def set_yellow(self):
+        """Good posture - Yellow"""
+        self.set_color(255, 200, 0)
+    
+    def set_red(self):
+        """Bad posture - Red"""
+        self.set_color(255, 0, 0)
+    
+    def pulse_while_speaking(self, duration=4):
+        """Pulse LEDs while speaking"""
+        if not self.strip:
+            return
+        
+        self.is_blinking = True
+        start_time = time.time()
+        base_color = self.current_color
+        
+        while time.time() - start_time < duration and self.is_blinking:
+            for brightness in range(30, 100, 15):
+                if not self.is_blinking:
+                    break
+                with self.lock:
+                    for i in range(LED_COUNT):
+                        r, g, b = base_color
+                        dimmed_r = int(r * brightness / 100)
+                        dimmed_g = int(g * brightness / 100)
+                        dimmed_b = int(b * brightness / 100)
+                        self.strip.setPixelColor(i, Color(dimmed_g, dimmed_r, dimmed_b))
+                    self.strip.show()
+                time.sleep(0.05)
+            
+            for brightness in range(100, 30, -15):
+                if not self.is_blinking:
+                    break
+                with self.lock:
+                    for i in range(LED_COUNT):
+                        r, g, b = base_color
+                        dimmed_r = int(r * brightness / 100)
+                        dimmed_g = int(g * brightness / 100)
+                        dimmed_b = int(b * brightness / 100)
+                        self.strip.setPixelColor(i, Color(dimmed_g, dimmed_r, dimmed_b))
+                    self.strip.show()
+                time.sleep(0.05)
+        
+        self.set_color(*base_color)
+        self.is_blinking = False
+
+face_display = FaceDisplay(oled)
+led_controller = LEDController(strip)
+
+if oled:
+    face_display.draw_normal_face()
+if strip:
+    led_controller.set_yellow()
 
 def neck_angle(hip, shoulder, head, shoulder_ref):
     """Calculate neck angle similar to MediaPipe method"""
@@ -60,29 +258,61 @@ def neck_angle(hip, shoulder, head, shoulder_ref):
     return abs(angle - 180.0)
 
 def speak_alert(message):
-    """Speak alert in Vietnamese using gTTS"""
+    """Speak alert in Vietnamese using gTTS with LED/OLED effects"""
     if not audio_available:
+        print(f"Audio not available, message: {message}")
         return
     
     def _speak():
+        temp_file = None
         try:
+            print(f"TTS: {message}")
+            
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
                 temp_file = fp.name
             
             tts = gTTS(text=message, lang='vi', slow=False)
             tts.save(temp_file)
+            print(f"TTS saved to {temp_file}")
             
-            subprocess.run(['mpg123', '-q', temp_file], check=False)
+            led_thread = threading.Thread(target=led_controller.pulse_while_speaking, args=(5,), daemon=True)
+            led_thread.start()
             
-            try:
-                os.remove(temp_file)
-            except:
-                pass
+            blink_thread = threading.Thread(target=blink_while_speaking, args=(5,), daemon=True)
+            blink_thread.start()
+            
+            # Use I2S audio device for MAX98357A
+            result = subprocess.run(['mpg123', '-a', 'hw:0,0', temp_file], capture_output=True)
+            print(f"mpg123 result: {result.returncode}")
+            
+            time.sleep(0.5)
+            led_controller.is_blinking = False
+            
         except Exception as e:
             print(f"TTS error: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except:
+                    pass
     
     thread = threading.Thread(target=_speak, daemon=True)
     thread.start()
+
+def blink_while_speaking(duration):
+    """Blink OLED eyes while speaking"""
+    start_time = time.time()
+    while time.time() - start_time < duration:
+        face_display.blink()
+        time.sleep(0.15)
+        if face_display.current_state == "normal":
+            face_display.draw_normal_face()
+        else:
+            face_display.draw_angry_face()
+        time.sleep(0.3)
 
 angle_buf = deque(maxlen=SMOOTHING_FRAMES)
 last_bad_time = None
@@ -155,6 +385,10 @@ def detect_posture():
 
         nose = np.array([kpts[0][1] * w, kpts[0][0] * h])
         s0 = kpts[0][2]
+        left_eye = np.array([kpts[1][1] * w, kpts[1][0] * h])
+        s_le = kpts[1][2]
+        right_eye = np.array([kpts[2][1] * w, kpts[2][0] * h])
+        s_re = kpts[2][2]
         lear = np.array([kpts[3][1] * w, kpts[3][0] * h])
         s_lear = kpts[3][2]
         rear = np.array([kpts[4][1] * w, kpts[4][0] * h])
@@ -197,22 +431,40 @@ def detect_posture():
             mid_shoulder = (ls + rs) * 0.5
             mid_hip = (lh + rh) * 0.5
             
-            if s_lear > min_conf and s_rear > min_conf:
-                mid_head = (lear + rear) * 0.5
+            # Use eyes to estimate mouth position (like MediaPipe)
+            # Mouth is approximately below nose at distance = eye_distance * 0.6
+            if s_le > min_conf and s_re > min_conf:
+                eye_distance = np.linalg.norm(left_eye - right_eye)
+                # Estimate mouth position: below nose
+                mouth_offset_y = eye_distance * 0.6
+                mid_mouth = nose + np.array([0, mouth_offset_y])
             else:
-                mid_head = nose - np.array([0, np.linalg.norm(ls - rs) * 0.4])
+                # Fallback: use ears
+                if s_lear > min_conf and s_rear > min_conf:
+                    ear_distance = np.linalg.norm(lear - rear)
+                    mouth_offset_y = ear_distance * 0.4
+                    mid_mouth = nose + np.array([0, mouth_offset_y])
+                else:
+                    # Last resort: estimate from shoulder width
+                    mid_mouth = nose + np.array([0, np.linalg.norm(ls - rs) * 0.4])
             
-            angle_val = neck_angle(mid_hip, mid_shoulder, mid_head, mid_shoulder)
+            # Calculate angle like MediaPipe: hip->shoulder, mouth->shoulder
+            angle_val = neck_angle(mid_hip, mid_shoulder, mid_mouth, mid_shoulder)
             angle_buf.append(angle_val)
             smoothed = float(np.mean(angle_buf))
             
             if frame_count % 2 == 0:
                 cv2.line(frame, tuple(mid_hip.astype(int)), tuple(mid_shoulder.astype(int)), (0, 255, 0), 2)
-                cv2.line(frame, tuple(mid_shoulder.astype(int)), tuple(mid_head.astype(int)), (0, 255, 0), 2)
+                cv2.line(frame, tuple(mid_shoulder.astype(int)), tuple(mid_mouth.astype(int)), (0, 255, 0), 2)
+                cv2.circle(frame, tuple(mid_mouth.astype(int)), 5, (255, 0, 255), -1)
             
             if smoothed > NECK_THRESHOLD:
                 posture_status = "Bad"
                 display_text = f"BAD POSTURE: {smoothed:.1f}deg"
+                
+                if face_display.current_state != "angry":
+                    face_display.draw_angry_face()
+                    led_controller.set_red()
                 
                 if last_bad_time is None:
                     last_bad_time = time.time()
@@ -227,6 +479,11 @@ def detect_posture():
             else:
                 posture_status = "Good"
                 display_text = f"GOOD: {smoothed:.1f}deg"
+                
+                if face_display.current_state != "normal":
+                    face_display.draw_normal_face()
+                    led_controller.set_yellow()
+                
                 last_bad_time = None
                 alert_playing = False
 
@@ -303,8 +560,8 @@ def get_stats():
 def index():
     return """
     <html>
-      <head>
-        <title>Posture Monitor</title>
+      <head>Assistant
+        <title>Posture Assistant</title>
         <style>
           body {
             background-color: #1a1a1a;
@@ -319,7 +576,7 @@ def index():
           }
           h1 {
             text-align: center;
-            color: #00ff88;
+            color: #ffffff;
             margin-bottom: 30px;
           }
           .content {
@@ -396,23 +653,23 @@ def index():
       </head>
       <body>
         <div class="container">
-          <h1>Trợ Lý Tư Thế Ngồi</h1>
+          <h1>Smart Posture Assistant</h1>
           <div class="content">
             <div class="video-container">
               <img src="/video_feed" />
             </div>
             <div class="stats-panel">
-              <h2 style="margin-top:0; color:#00ff88;">Thống Kê</h2>
+              <h2 style="margin-top:0; color:#00ff88;">Status</h2>
               <div class="stat-item">
-                <div class="stat-label">Tư Thế</div>
+                <div class="stat-label">Posture</div>
                 <div class="stat-value" id="posture">-</div>
               </div>
               <div class="stat-item">
-                <div class="stat-label">Góc Cổ</div>
+                <div class="stat-label">Angle</div>
                 <div class="stat-value" id="angle">-</div>
-              </div>
+              </div>Status
               <div class="stat-item">
-                <div class="stat-label">Khoảng Cách</div>
+                <div class="stat-label">Distance</div>
                 <div class="stat-value" id="distance">-</div>
               </div>
               <div class="stat-item">
@@ -420,13 +677,12 @@ def index():
                 <div class="stat-value" id="fps">-</div>
               </div>
               <div class="info">
-                <strong>Hướng Dẫn:</strong><br>
-                • Tốt: góc cổ dưới 35°<br>
-                • Giữ lưng thẳng<br>
-                • Đầu thẳng hàng với cột sống<br>
-                • Giữ khoảng cách phù hợp<br>
-                • Cảnh báo bằng giọng nói tiếng Việt<br>
-                • Nghỉ ngơi mỗi 20 phút
+                <strong>Instructions:</strong><br>
+                • GOOD: Degree <= 35°<br>
+                • OLED: Happy/ angry face<br>
+                • LED: Yellow (good) / Red (bad)<br>
+                • Pulse led while talikng <br>
+                • Rest every 20 mminutes
               </div>
             </div>
           </div>
@@ -436,11 +692,20 @@ def index():
     """
 
 if __name__ == '__main__':
-    print("Khởi động Trợ Lý Tư Thế với Giọng Nói Tiếng Việt...")
-    print("Truy cập tại: http://localhost:5000")
+    print("Starting bot...")
+    print("Access at: http://localhost:5000")
     
     t = threading.Thread(target=detect_posture)
     t.daemon = True
     t.start()
     
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False)
+    try:
+        app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False)
+    finally:
+        if strip:
+            for i in range(LED_COUNT):
+                strip.setPixelColor(i, Color(0, 0, 0))
+            strip.show()
+        if oled:
+            oled.fill(0)
+            oled.show()
