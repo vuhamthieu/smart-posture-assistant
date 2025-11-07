@@ -21,11 +21,10 @@ from rpi_ws281x import PixelStrip, Color
 def init_audio():
     """Initialize I2S audio for MAX98357A"""
     try:
-        # Check if I2S is enabled
-        result = subprocess.run(['aplay', '-l'], capture_output=True, text=True)
-        if 'I2S' not in result.stdout and 'bcm2835' not in result.stdout:
-            print("WARNING: I2S may not be enabled!")
-            print("Enable I2S: Add 'dtoverlay=hifiberry-dac' to /boot/config.txt")
+        # Check available audio devices
+        result = subprocess.run(['aplay', '-L'], capture_output=True, text=True)
+        print("Available audio devices:")
+        print(result.stdout)
         
         # Set volume
         subprocess.run(['amixer', 'set', 'Master', '100%'], check=False, capture_output=True)
@@ -37,7 +36,7 @@ def init_audio():
             print("mpg123 not found! Install: sudo apt-get install mpg123")
             return False
         
-        print("I2S Audio initialized for MAX98357A")
+        print("Audio initialized for MAX98357A")
         return True
     except Exception as e:
         print(f"Audio setup failed: {e}")
@@ -61,7 +60,7 @@ FACE_TOO_CLOSE_RATIO = 0.35
 FACE_TOO_FAR_RATIO = 0.08
 
 LED_COUNT = 12
-LED_PIN = 13
+LED_PIN = 12
 LED_BRIGHTNESS = 80
 LED_FREQ_HZ = 800000
 LED_DMA = 10
@@ -75,8 +74,9 @@ LED_CHANNEL = 0
 # VIN -> 5V, GND -> GND
 
 # LED Ring WS2812B:
-# DIN -> GPIO 13 (Pin 33 - PWM1)
+# DIN -> GPIO 10 (Pin 19 - SPI0 MOSI) *** MOST COMPATIBLE ***
 # VCC -> 5V external, GND -> GND (common with Pi)
+# Note: GPIO10 uses SPI, most stable for WS2812B with I2S audio
 
 interpreter = Interpreter(MODEL_PATH, num_threads=INFER_THREADS)
 interpreter.allocate_tensors()
@@ -181,22 +181,27 @@ class LEDController:
         self.lock = threading.Lock()
         
     def set_color(self, r, g, b):
-        """Set all LEDs to one color - RGB order"""
+        """Set all LEDs to one color"""
         if not self.strip:
             return
         with self.lock:
+            # Test both RGB and GRB order
+            # WS2812B typically uses GRB
             for i in range(LED_COUNT):
-                self.strip.setPixelColor(i, Color(g, r, b))
+                self.strip.setPixelColor(i, Color(g, r, b))  # GRB order
             self.strip.show()
             self.current_color = (r, g, b)
+            print(f"LED set to RGB({r},{g},{b}) -> GRB({g},{r},{b})")
     
     def set_yellow(self):
         """Good posture - Yellow"""
-        self.set_color(255, 200, 0)
+        print("Setting LED to YELLOW (good posture)")
+        self.set_color(255, 200, 0)  # RGB: Red+Green = Yellow
     
     def set_red(self):
         """Bad posture - Red"""
-        self.set_color(255, 0, 0)
+        print("Setting LED to RED (bad posture)")
+        self.set_color(0, 255, 0)  # RGB: Full Red
     
     def pulse_while_speaking(self, duration=4):
         """Pulse LEDs while speaking"""
@@ -258,22 +263,17 @@ def neck_angle(hip, shoulder, head, shoulder_ref):
     return abs(angle - 180.0)
 
 def speak_alert(message):
-    """Speak alert in Vietnamese using gTTS with LED/OLED effects"""
+    """Speak alert in Vietnamese using cached TTS with LED/OLED effects"""
     if not audio_available:
         print(f"Audio not available, message: {message}")
         return
     
     def _speak():
-        temp_file = None
         try:
-            print(f"TTS: {message}")
+            print(f"TTS: {message[:30]}...")
             
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
-                temp_file = fp.name
-            
-            tts = gTTS(text=message, lang='vi', slow=False)
-            tts.save(temp_file)
-            print(f"TTS saved to {temp_file}")
+            # Use cached TTS file (instant!)
+            tts_file = get_cached_tts(message)
             
             led_thread = threading.Thread(target=led_controller.pulse_while_speaking, args=(5,), daemon=True)
             led_thread.start()
@@ -281,9 +281,10 @@ def speak_alert(message):
             blink_thread = threading.Thread(target=blink_while_speaking, args=(5,), daemon=True)
             blink_thread.start()
             
-            # Use I2S audio device for MAX98357A
-            result = subprocess.run(['mpg123', '-a', 'hw:0,0', temp_file], capture_output=True)
-            print(f"mpg123 result: {result.returncode}")
+            # Play cached file
+            result = subprocess.run(['mpg123', tts_file], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"mpg123 stderr: {result.stderr}")
             
             time.sleep(0.5)
             led_controller.is_blinking = False
@@ -292,12 +293,6 @@ def speak_alert(message):
             print(f"TTS error: {e}")
             import traceback
             traceback.print_exc()
-        finally:
-            if temp_file and os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except:
-                    pass
     
     thread = threading.Thread(target=_speak, daemon=True)
     thread.start()
@@ -350,6 +345,33 @@ ALERT_MESSAGES = [
     "Hãy giữ đầu thẳng với cột sống"
 ]
 alert_index = 0
+
+# Cache TTS files to reduce delay
+TTS_CACHE_DIR = "/tmp/tts_cache"
+os.makedirs(TTS_CACHE_DIR, exist_ok=True)
+
+def get_cached_tts(message):
+    """Get or create cached TTS file"""
+    import hashlib
+    msg_hash = hashlib.md5(message.encode()).hexdigest()
+    cache_file = os.path.join(TTS_CACHE_DIR, f"{msg_hash}.mp3")
+    
+    if not os.path.exists(cache_file):
+        print(f"Creating TTS cache for: {message[:30]}...")
+        tts = gTTS(text=message, lang='vi', slow=False)
+        tts.save(cache_file)
+    
+    return cache_file
+
+# Pre-cache alert messages at startup
+print("Pre-caching TTS messages...")
+for msg in ALERT_MESSAGES:
+    try:
+        get_cached_tts(msg)
+    except:
+        pass
+get_cached_tts("Bạn đang ngồi quá gần màn hình, hãy lùi ra xa một chút")
+print("TTS cache ready!")
 
 def detect_posture():
     global outputFrame, last_bad_time, alert_playing, stats
@@ -560,7 +582,7 @@ def get_stats():
 def index():
     return """
     <html>
-      <head>Assistant
+      <head>
         <title>Posture Assistant</title>
         <style>
           body {
@@ -576,7 +598,7 @@ def index():
           }
           h1 {
             text-align: center;
-            color: #ffffff;
+            color: #00ff88;
             margin-bottom: 30px;
           }
           .content {
@@ -653,21 +675,21 @@ def index():
       </head>
       <body>
         <div class="container">
-          <h1>Smart Posture Assistant</h1>
+          <h1>Smart Posture Assistant with OLED & LED</h1>
           <div class="content">
             <div class="video-container">
               <img src="/video_feed" />
             </div>
             <div class="stats-panel">
-              <h2 style="margin-top:0; color:#00ff88;">Status</h2>
+              <h2 style="margin-top:0; color:#00ff88;">Live Status</h2>
               <div class="stat-item">
                 <div class="stat-label">Posture</div>
                 <div class="stat-value" id="posture">-</div>
               </div>
               <div class="stat-item">
-                <div class="stat-label">Angle</div>
+                <div class="stat-label">Neck Angle</div>
                 <div class="stat-value" id="angle">-</div>
-              </div>Status
+              </div>
               <div class="stat-item">
                 <div class="stat-label">Distance</div>
                 <div class="stat-value" id="distance">-</div>
@@ -678,11 +700,11 @@ def index():
               </div>
               <div class="info">
                 <strong>Instructions:</strong><br>
-                • GOOD: Degree <= 35°<br>
-                • OLED: Happy/ angry face<br>
+                • Good: neck angle under 35 degrees<br>
+                • OLED: Happy/Angry face<br>
                 • LED: Yellow (good) / Red (bad)<br>
-                • Pulse led while talikng <br>
-                • Rest every 20 mminutes
+                • LED blinks while speaking<br>
+                • Rest every 20 minutes
               </div>
             </div>
           </div>
@@ -692,7 +714,7 @@ def index():
     """
 
 if __name__ == '__main__':
-    print("Starting bot...")
+    print("Starting Smart Posture Assistant with OLED & LED...")
     print("Access at: http://localhost:5000")
     
     t = threading.Thread(target=detect_posture)
