@@ -288,10 +288,10 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>📊 Posture Data Collection</h1>
+            <h1>Posture Data Collection</h1>
             
             <div class="instructions">
-                <h3>📝 Instructions:</h3>
+                <h3>Instructions:</h3>
                 <ul>
                     <li>Click <strong>GOOD</strong> when sitting with proper posture</li>
                     <li>Click <strong>BAD</strong> when slouching or poor posture</li>
@@ -305,10 +305,10 @@ def index():
             
             <div class="controls">
                 <button class="btn-good" onclick="saveLabel('good')">
-                    ✓ GOOD POSTURE
+                    GOOD POSTURE
                 </button>
                 <button class="btn-bad" onclick="saveLabel('bad')">
-                    ✗ BAD POSTURE
+                    BAD POSTURE
                 </button>
             </div>
             

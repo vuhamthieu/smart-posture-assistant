@@ -19,18 +19,14 @@ import RPi.GPIO as GPIO
 from rpi_ws281x import PixelStrip, Color
 
 def init_audio():
-    """Initialize I2S audio for MAX98357A"""
     try:
-        # Check available audio devices
         result = subprocess.run(['aplay', '-L'], capture_output=True, text=True)
         print("Available audio devices:")
         print(result.stdout)
         
-        # Set volume
         subprocess.run(['amixer', 'set', 'Master', '100%'], check=False, capture_output=True)
         subprocess.run(['amixer', 'set', 'PCM', '100%'], check=False, capture_output=True)
         
-        # Check mpg123
         result = subprocess.run(['which', 'mpg123'], capture_output=True)
         if result.returncode != 0:
             print("mpg123 not found! Install: sudo apt-get install mpg123")
@@ -67,17 +63,6 @@ LED_DMA = 10
 LED_INVERT = False
 LED_CHANNEL = 0
 
-# MAX98357A I2S Audio Amplifier:
-# LRC (WS)   -> GPIO 19 (Pin 35)
-# BCLK       -> GPIO 18 (Pin 12)
-# DIN (Data) -> GPIO 21 (Pin 40)
-# VIN -> 5V, GND -> GND
-
-# LED Ring WS2812B:
-# DIN -> GPIO 10 (Pin 19 - SPI0 MOSI) *** MOST COMPATIBLE ***
-# VCC -> 5V external, GND -> GND (common with Pi)
-# Note: GPIO10 uses SPI, most stable for WS2812B with I2S audio
-
 interpreter = Interpreter(MODEL_PATH, num_threads=INFER_THREADS)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
@@ -113,7 +98,6 @@ class FaceDisplay:
         self.current_state = "normal"
         
     def draw_normal_face(self):
-        """Draw normal/happy face"""
         if not self.oled:
             return
         
@@ -133,7 +117,6 @@ class FaceDisplay:
         self.current_state = "normal"
     
     def draw_angry_face(self):
-        """Draw angry face"""
         if not self.oled:
             return
         
@@ -155,7 +138,6 @@ class FaceDisplay:
         self.current_state = "angry"
     
     def blink(self):
-        """Blink eyes (close briefly)"""
         if not self.oled:
             return
         
@@ -181,30 +163,21 @@ class LEDController:
         self.lock = threading.Lock()
         
     def set_color(self, r, g, b):
-        """Set all LEDs to one color"""
         if not self.strip:
             return
         with self.lock:
-            # Test both RGB and GRB order
-            # WS2812B typically uses GRB
             for i in range(LED_COUNT):
-                self.strip.setPixelColor(i, Color(g, r, b))  # GRB order
+                self.strip.setPixelColor(i, Color(g, r, b))
             self.strip.show()
             self.current_color = (r, g, b)
-            print(f"LED set to RGB({r},{g},{b}) -> GRB({g},{r},{b})")
     
     def set_yellow(self):
-        """Good posture - Yellow"""
-        print("Setting LED to YELLOW (good posture)")
-        self.set_color(255, 200, 0)  # RGB: Red+Green = Yellow
+        self.set_color(255, 200, 0)
     
     def set_red(self):
-        """Bad posture - Red"""
-        print("Setting LED to RED (bad posture)")
-        self.set_color(0, 255, 0)  # RGB: Full Red
+        self.set_color(255, 0, 0)
     
     def pulse_while_speaking(self, duration=4):
-        """Pulse LEDs while speaking"""
         if not self.strip:
             return
         
@@ -250,20 +223,22 @@ if oled:
 if strip:
     led_controller.set_yellow()
 
-def neck_angle(hip, shoulder, head, shoulder_ref):
-    """Calculate neck angle similar to MediaPipe method"""
-    vec1 = hip - shoulder_ref
-    vec2 = head - shoulder_ref
-    denom = (np.linalg.norm(vec1) * np.linalg.norm(vec2))
-    if denom == 0:
-        return 0.0
-    cosang = np.dot(vec1, vec2) / denom
-    cosang = np.clip(cosang, -1.0, 1.0)
-    angle = math.degrees(math.acos(cosang))
-    return abs(angle - 180.0)
+def calculate_neck_angle(shoulder_center, mouth):
+    shoulder_to_mouth = mouth - shoulder_center
+    vertical_component = shoulder_to_mouth[1]
+    
+    if vertical_component > 0:
+        horizontal_component = abs(shoulder_to_mouth[0])
+        if vertical_component > 0:
+            angle_val = math.degrees(math.atan(horizontal_component / vertical_component))
+        else:
+            angle_val = 90
+    else:
+        angle_val = 90
+    
+    return min(angle_val, 90)
 
 def speak_alert(message):
-    """Speak alert in Vietnamese using cached TTS with LED/OLED effects"""
     if not audio_available:
         print(f"Audio not available, message: {message}")
         return
@@ -272,7 +247,6 @@ def speak_alert(message):
         try:
             print(f"TTS: {message[:30]}...")
             
-            # Use cached TTS file (instant!)
             tts_file = get_cached_tts(message)
             
             led_thread = threading.Thread(target=led_controller.pulse_while_speaking, args=(5,), daemon=True)
@@ -281,7 +255,6 @@ def speak_alert(message):
             blink_thread = threading.Thread(target=blink_while_speaking, args=(5,), daemon=True)
             blink_thread.start()
             
-            # Play cached file
             result = subprocess.run(['mpg123', tts_file], capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"mpg123 stderr: {result.stderr}")
@@ -298,7 +271,6 @@ def speak_alert(message):
     thread.start()
 
 def blink_while_speaking(duration):
-    """Blink OLED eyes while speaking"""
     start_time = time.time()
     while time.time() - start_time < duration:
         face_display.blink()
@@ -346,12 +318,10 @@ ALERT_MESSAGES = [
 ]
 alert_index = 0
 
-# Cache TTS files to reduce delay
 TTS_CACHE_DIR = "/tmp/tts_cache"
 os.makedirs(TTS_CACHE_DIR, exist_ok=True)
 
 def get_cached_tts(message):
-    """Get or create cached TTS file"""
     import hashlib
     msg_hash = hashlib.md5(message.encode()).hexdigest()
     cache_file = os.path.join(TTS_CACHE_DIR, f"{msg_hash}.mp3")
@@ -363,7 +333,6 @@ def get_cached_tts(message):
     
     return cache_file
 
-# Pre-cache alert messages at startup
 print("Pre-caching TTS messages...")
 for msg in ALERT_MESSAGES:
     try:
@@ -419,13 +388,9 @@ def detect_posture():
         s1 = kpts[5][2]
         rs = np.array([kpts[6][1] * w, kpts[6][0] * h])
         s2 = kpts[6][2]
-        lh = np.array([kpts[11][1] * w, kpts[11][0] * h])
-        s3 = kpts[11][2]
-        rh = np.array([kpts[12][1] * w, kpts[12][0] * h])
-        s4 = kpts[12][2]
 
         min_conf = 0.25
-        key_scores = [s0, s1, s2, s3, s4]
+        key_scores = [s0, s1, s2, s_le, s_re]
         
         distance_status = "OK"
         if s0 > min_conf:
@@ -451,34 +416,36 @@ def detect_posture():
             display_text = "No person"
         else:
             mid_shoulder = (ls + rs) * 0.5
-            mid_hip = (lh + rh) * 0.5
             
-            # Use eyes to estimate mouth position (like MediaPipe)
-            # Mouth is approximately below nose at distance = eye_distance * 0.6
             if s_le > min_conf and s_re > min_conf:
                 eye_distance = np.linalg.norm(left_eye - right_eye)
-                # Estimate mouth position: below nose
                 mouth_offset_y = eye_distance * 0.6
                 mid_mouth = nose + np.array([0, mouth_offset_y])
+            elif s_lear > min_conf and s_rear > min_conf:
+                ear_distance = np.linalg.norm(lear - rear)
+                mouth_offset_y = ear_distance * 0.4
+                mid_mouth = nose + np.array([0, mouth_offset_y])
             else:
-                # Fallback: use ears
-                if s_lear > min_conf and s_rear > min_conf:
-                    ear_distance = np.linalg.norm(lear - rear)
-                    mouth_offset_y = ear_distance * 0.4
-                    mid_mouth = nose + np.array([0, mouth_offset_y])
-                else:
-                    # Last resort: estimate from shoulder width
-                    mid_mouth = nose + np.array([0, np.linalg.norm(ls - rs) * 0.4])
+                mid_mouth = nose + np.array([0, np.linalg.norm(ls - rs) * 0.4])
             
-            # Calculate angle like MediaPipe: hip->shoulder, mouth->shoulder
-            angle_val = neck_angle(mid_hip, mid_shoulder, mid_mouth, mid_shoulder)
+            angle_val = calculate_neck_angle(mid_shoulder, mid_mouth)
             angle_buf.append(angle_val)
             smoothed = float(np.mean(angle_buf))
             
+            if frame_count % 30 == 0:
+                print(f"Shoulder: {mid_shoulder}")
+                print(f"Mouth: {mid_mouth}") 
+                print(f"Angle: {smoothed:.1f}°")
+                print(f"Posture: {'Good' if smoothed <= NECK_THRESHOLD else 'Bad'}")
+                print("---")
+            
             if frame_count % 2 == 0:
-                cv2.line(frame, tuple(mid_hip.astype(int)), tuple(mid_shoulder.astype(int)), (0, 255, 0), 2)
-                cv2.line(frame, tuple(mid_shoulder.astype(int)), tuple(mid_mouth.astype(int)), (0, 255, 0), 2)
+                cv2.line(frame, tuple(ls.astype(int)), tuple(mid_mouth.astype(int)), (0, 255, 0), 2)
+                cv2.line(frame, tuple(rs.astype(int)), tuple(mid_mouth.astype(int)), (0, 255, 0), 2)
+                cv2.circle(frame, tuple(mid_shoulder.astype(int)), 5, (0, 255, 255), -1)
                 cv2.circle(frame, tuple(mid_mouth.astype(int)), 5, (255, 0, 255), -1)
+                cv2.circle(frame, tuple(ls.astype(int)), 5, (255, 255, 0), -1)
+                cv2.circle(frame, tuple(rs.astype(int)), 5, (255, 255, 0), -1)
             
             if smoothed > NECK_THRESHOLD:
                 posture_status = "Bad"
@@ -675,7 +642,7 @@ def index():
       </head>
       <body>
         <div class="container">
-          <h1>Smart Posture Assistant with OLED & LED</h1>
+          <h1>Smart Posture Assistant</h1>
           <div class="content">
             <div class="video-container">
               <img src="/video_feed" />
@@ -698,14 +665,6 @@ def index():
                 <div class="stat-label">FPS</div>
                 <div class="stat-value" id="fps">-</div>
               </div>
-              <div class="info">
-                <strong>Instructions:</strong><br>
-                • Good: neck angle under 35 degrees<br>
-                • OLED: Happy/Angry face<br>
-                • LED: Yellow (good) / Red (bad)<br>
-                • LED blinks while speaking<br>
-                • Rest every 20 minutes
-              </div>
             </div>
           </div>
         </div>
@@ -714,7 +673,7 @@ def index():
     """
 
 if __name__ == '__main__':
-    print("Starting Smart Posture Assistant with OLED & LED...")
+    print("Starting Posture Assistant...")
     print("Access at: http://localhost:5000")
     
     t = threading.Thread(target=detect_posture)
