@@ -19,6 +19,7 @@ import RPi.GPIO as GPIO
 from rpi_ws281x import PixelStrip, Color
 
 def init_audio():
+    """Initialize I2S audio for MAX98357A"""
     try:
         result = subprocess.run(['aplay', '-L'], capture_output=True, text=True)
         print("Available audio devices:")
@@ -47,7 +48,7 @@ except Exception:
 
 MODEL_PATH = "/home/theo/4.tflite"
 CAMERA_ID = 0
-NECK_THRESHOLD = 35
+NECK_THRESHOLD = 35  # Góc tối đa cho tư thế tốt
 SMOOTHING_FRAMES = 7
 BAD_DURATION_TO_ALERT = 2.0
 INFER_THREADS = 2
@@ -57,7 +58,7 @@ FACE_TOO_FAR_RATIO = 0.08
 
 LED_COUNT = 12
 LED_PIN = 12
-LED_BRIGHTNESS = 80
+LED_BRIGHTNESS = 20
 LED_FREQ_HZ = 800000
 LED_DMA = 10
 LED_INVERT = False
@@ -98,6 +99,7 @@ class FaceDisplay:
         self.current_state = "normal"
         
     def draw_normal_face(self):
+        """Draw normal/happy face"""
         if not self.oled:
             return
         
@@ -117,6 +119,7 @@ class FaceDisplay:
         self.current_state = "normal"
     
     def draw_angry_face(self):
+        """Draw angry face"""
         if not self.oled:
             return
         
@@ -138,6 +141,7 @@ class FaceDisplay:
         self.current_state = "angry"
     
     def blink(self):
+        """Blink eyes (close briefly)"""
         if not self.oled:
             return
         
@@ -163,6 +167,7 @@ class LEDController:
         self.lock = threading.Lock()
         
     def set_color(self, r, g, b):
+        """Set all LEDs to one color"""
         if not self.strip:
             return
         with self.lock:
@@ -172,12 +177,15 @@ class LEDController:
             self.current_color = (r, g, b)
     
     def set_yellow(self):
+        """Good posture - Yellow"""
         self.set_color(255, 200, 0)
     
     def set_red(self):
-        self.set_color(255, 0, 0)
+        """Bad posture - Red"""
+        self.set_color(0, 255, 0)
     
     def pulse_while_speaking(self, duration=4):
+        """Pulse LEDs while speaking"""
         if not self.strip:
             return
         
@@ -223,22 +231,41 @@ if oled:
 if strip:
     led_controller.set_yellow()
 
-def calculate_neck_angle(shoulder_center, mouth):
-    shoulder_to_mouth = mouth - shoulder_center
-    vertical_component = shoulder_to_mouth[1]
+def calculate_neck_angle(left_shoulder, right_shoulder, mouth):
+    """
+    Tính góc cổ theo phương pháp tương tự MediaPipe (không cần hip)
+    Dùng vector từ vai trái → vai phải làm reference
+    So sánh với vector từ trung điểm vai → miệng
+    """
+    # Vector ngang (vai trái → vai phải) - làm baseline
+    shoulder_vector = right_shoulder - left_shoulder
     
-    if vertical_component > 0:
-        horizontal_component = abs(shoulder_to_mouth[0])
-        if vertical_component > 0:
-            angle_val = math.degrees(math.atan(horizontal_component / vertical_component))
-        else:
-            angle_val = 90
-    else:
-        angle_val = 90
+    # Trung điểm vai
+    mid_shoulder = (left_shoulder + right_shoulder) / 2
     
-    return min(angle_val, 90)
+    # Vector từ vai → miệng
+    neck_vector = mouth - mid_shoulder
+    
+    # Tính góc giữa 2 vector
+    dot_product = np.dot(shoulder_vector, neck_vector)
+    norm_product = np.linalg.norm(shoulder_vector) * np.linalg.norm(neck_vector)
+    
+    if norm_product == 0:
+        return 0
+    
+    cosine_angle = np.clip(dot_product / norm_product, -1.0, 1.0)
+    angle_rad = np.arccos(cosine_angle)
+    angle_deg = np.degrees(angle_rad)
+    
+    # Góc cổ thực tế: góc lệch so với phương ngang
+    # Khi ngồi thẳng: góc gần 90° (vuông góc với vai)
+    # Khi cúi đầu: góc nhỏ hơn
+    neck_angle = abs(90 - angle_deg)
+    
+    return neck_angle
 
 def speak_alert(message):
+    """Speak alert in Vietnamese using cached TTS with LED/OLED effects"""
     if not audio_available:
         print(f"Audio not available, message: {message}")
         return
@@ -271,6 +298,7 @@ def speak_alert(message):
     thread.start()
 
 def blink_while_speaking(duration):
+    """Blink OLED eyes while speaking"""
     start_time = time.time()
     while time.time() - start_time < duration:
         face_display.blink()
@@ -322,6 +350,7 @@ TTS_CACHE_DIR = "/tmp/tts_cache"
 os.makedirs(TTS_CACHE_DIR, exist_ok=True)
 
 def get_cached_tts(message):
+    """Get or create cached TTS file"""
     import hashlib
     msg_hash = hashlib.md5(message.encode()).hexdigest()
     cache_file = os.path.join(TTS_CACHE_DIR, f"{msg_hash}.mp3")
@@ -374,6 +403,7 @@ def detect_posture():
 
         kpts = output_data[0][0] if output_data.ndim == 4 else output_data[0]
 
+        # CHỈ LẤY CÁC KEYPOINTS CẦN THIẾT (KHÔNG CÓ HIP)
         nose = np.array([kpts[0][1] * w, kpts[0][0] * h])
         s0 = kpts[0][2]
         left_eye = np.array([kpts[1][1] * w, kpts[1][0] * h])
@@ -390,8 +420,9 @@ def detect_posture():
         s2 = kpts[6][2]
 
         min_conf = 0.25
-        key_scores = [s0, s1, s2, s_le, s_re]
+        key_scores = [s0, s1, s2, s_le, s_re]  # Chỉ dùng nose, eyes, shoulders
         
+        # Distance detection
         distance_status = "OK"
         if s0 > min_conf:
             if s_lear > min_conf and s_rear > min_conf:
@@ -415,8 +446,7 @@ def detect_posture():
             smoothed = 0
             display_text = "No person"
         else:
-            mid_shoulder = (ls + rs) * 0.5
-            
+            # Ước tính vị trí miệng dựa trên khoảng cách mắt
             if s_le > min_conf and s_re > min_conf:
                 eye_distance = np.linalg.norm(left_eye - right_eye)
                 mouth_offset_y = eye_distance * 0.6
@@ -428,24 +458,31 @@ def detect_posture():
             else:
                 mid_mouth = nose + np.array([0, np.linalg.norm(ls - rs) * 0.4])
             
-            angle_val = calculate_neck_angle(mid_shoulder, mid_mouth)
+            # Tính góc cổ: dùng 2 vai và miệng (không cần hip)
+            angle_val = calculate_neck_angle(ls, rs, mid_mouth)
             angle_buf.append(angle_val)
             smoothed = float(np.mean(angle_buf))
             
+            # Debug log
             if frame_count % 30 == 0:
-                print(f"Shoulder: {mid_shoulder}")
+                print(f"Left Shoulder: {ls}")
+                print(f"Right Shoulder: {rs}")
                 print(f"Mouth: {mid_mouth}") 
                 print(f"Angle: {smoothed:.1f}°")
                 print(f"Posture: {'Good' if smoothed <= NECK_THRESHOLD else 'Bad'}")
                 print("---")
             
+            # Vẽ visualization
+            mid_shoulder = (ls + rs) / 2
             if frame_count % 2 == 0:
-                cv2.line(frame, tuple(ls.astype(int)), tuple(mid_mouth.astype(int)), (0, 255, 0), 2)
-                cv2.line(frame, tuple(rs.astype(int)), tuple(mid_mouth.astype(int)), (0, 255, 0), 2)
+                # Vẽ đường vai ngang
+                cv2.line(frame, tuple(ls.astype(int)), tuple(rs.astype(int)), (255, 0, 255), 2)
+                # Vẽ đường từ trung điểm vai đến miệng
+                cv2.line(frame, tuple(mid_shoulder.astype(int)), tuple(mid_mouth.astype(int)), (0, 255, 0), 3)
                 cv2.circle(frame, tuple(mid_shoulder.astype(int)), 5, (0, 255, 255), -1)
                 cv2.circle(frame, tuple(mid_mouth.astype(int)), 5, (255, 0, 255), -1)
-                cv2.circle(frame, tuple(ls.astype(int)), 5, (255, 255, 0), -1)
-                cv2.circle(frame, tuple(rs.astype(int)), 5, (255, 255, 0), -1)
+                cv2.circle(frame, tuple(ls.astype(int)), 6, (255, 255, 0), -1)
+                cv2.circle(frame, tuple(rs.astype(int)), 6, (255, 255, 0), -1)
             
             if smoothed > NECK_THRESHOLD:
                 posture_status = "Bad"
@@ -642,7 +679,7 @@ def index():
       </head>
       <body>
         <div class="container">
-          <h1>Smart Posture Assistant</h1>
+          <h1>Smart Posture Assistant (No Hip Detection)</h1>
           <div class="content">
             <div class="video-container">
               <img src="/video_feed" />
@@ -665,6 +702,15 @@ def index():
                 <div class="stat-label">FPS</div>
                 <div class="stat-value" id="fps">-</div>
               </div>
+              <div class="info">
+                <strong>Instructions:</strong><br>
+                • Chỉ dùng vai và đầu (không cần hip)<br>
+                • Góc cổ <= 35°: tốt<br>
+                • OLED: Mặt vui/tức giận<br>
+                • LED: Vàng (tốt) / Đỏ (xấu)<br>
+                • LED nhấp nháy khi cảnh báo<br>
+                • Nghỉ mỗi 30 phút
+              </div>
             </div>
           </div>
         </div>
@@ -673,7 +719,7 @@ def index():
     """
 
 if __name__ == '__main__':
-    print("Starting Posture Assistant...")
+    print("Starting Posture Assistant (WITHOUT HIP detection)...")
     print("Access at: http://localhost:5000")
     
     t = threading.Thread(target=detect_posture)
