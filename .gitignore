@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+
+# Logs
+*.log
+bot.log
+update.log
+api.log
+
+# Runtime
+*.pid
+bot.pid
+
+# Backups
+backups/
+
+# Data
+data/*.csv
+
+# Models (if large)
+models/*.pkl
+models/*.tflite
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
