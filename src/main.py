@@ -15,6 +15,8 @@ from board import SCL, SDA
 import busio
 from adafruit_ssd1306 import SSD1306_I2C
 from rpi_ws281x import PixelStrip, Color
+import joblib
+from utils import extract_features
 
 def init_audio():
     try:
@@ -49,6 +51,19 @@ LED_FREQ_HZ = 800000
 LED_DMA = 10
 LED_INVERT = False
 LED_CHANNEL = 0
+
+# Load ML Model 
+try:
+    posture_model = joblib.load("/home/theo/smart-posture-assistant/posture_model.pkl")
+    posture_scaler = joblib.load("/home/theo/smart-posture-assistant/scaler.pkl")
+    use_ml_model = True
+    print("✓ ML Model loaded successfully")
+except Exception as e:
+    print(f"⚠ ML Model not found: {e}")
+    print("Using angle-based detection only")
+    posture_model = None
+    posture_scaler = None
+    use_ml_model = False
 
 interpreter = Interpreter(MODEL_PATH, num_threads=INFER_THREADS)
 interpreter.allocate_tensors()
@@ -216,7 +231,7 @@ class LEDController:
         self.set_color(255, 200, 0)
     
     def set_red(self):
-        self.set_color(0, 255, 0)
+        self.set_color(255, 0, 0)
     
     def pulse_while_speaking(self, duration=4):
         if not self.strip:
@@ -315,14 +330,19 @@ def blink_while_speaking(duration):
         time.sleep(0.3)
 
 def timer_updater():
+    last_update = 0
     while True:
         if study_timer.update():
             speak_alert("Hết giờ học rồi, hãy nghỉ giải lao nhé")
-        if study_timer.is_running and oled:
+            if oled:
+                face_display.draw_normal_face()
+        current_time = time.time()
+        if study_timer.is_running and oled and current_time - last_update >= 1:
             time_str = study_timer.get_time_str()
-            if time_str:
+            if time_str and face_display.current_state == "normal":
                 face_display.draw_timer(time_str)
-        time.sleep(1)
+            last_update = current_time
+        time.sleep(0.5)
 
 angle_buf = deque(maxlen=SMOOTHING_FRAMES)
 last_bad_time = None
@@ -346,7 +366,7 @@ cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 app = Flask(__name__)
 outputFrame = None
 lock = threading.Lock()
-stats = {'posture_status': 'Good', 'neck_angle': 0, 'distance_status': 'OK', 'fps': 0}
+stats = {'posture_status': 'Good', 'neck_angle': 0, 'distance_status': 'OK', 'fps': 0, 'ml_confidence': 0}
 last_display_text = ""
 last_distance_status = "OK"
 last_fps_text = ""
@@ -371,6 +391,10 @@ def detect_posture():
     global last_alert_time, alert_index
     frame_count = 0
     start_time = time.time()
+    
+    # Thêm buffer cho dự đoán ML
+    ml_prediction_buf = deque(maxlen=5)  # Làm mượt dự đoán ML
+    
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -424,6 +448,7 @@ def detect_posture():
             posture_status = "Unknown"
             smoothed = 0
             display_text = "No person"
+            ml_confidence = 0
         else:
             if s_le > min_conf and s_re > min_conf:
                 eye_distance = np.linalg.norm(left_eye - right_eye)
@@ -438,6 +463,40 @@ def detect_posture():
             angle_val = calculate_neck_angle(ls, rs, mid_mouth)
             angle_buf.append(angle_val)
             smoothed = float(np.mean(angle_buf))
+            
+            ml_confidence = 0
+            if use_ml_model and posture_model is not None:
+                try:
+                    features = extract_features(kpts, w, h)
+                    features_array = np.array(features).reshape(1, -1)
+                    features_scaled = posture_scaler.transform(features_array)
+                    ml_prediction = posture_model.predict(features_scaled)[0]
+                    ml_confidence = posture_model.predict_proba(features_scaled)[0].max()
+                    
+            
+                    ml_prediction_buf.append(ml_prediction)
+                    
+                   
+                    if len(ml_prediction_buf) >= 3:
+                        from collections import Counter
+                        final_prediction = Counter(ml_prediction_buf).most_common(1)[0][0]
+                    else:
+                        final_prediction = ml_prediction               
+                    if ml_confidence > 0.7:  
+                        posture_status = "Good" if final_prediction == 'good' else "Bad"
+                        method = "ML"
+                    else:
+                        posture_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
+                        method = "Angle"
+                        
+                except Exception as e:
+                    print(f"ML prediction error: {e}")
+                    posture_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
+                    method = "Angle (fallback)"
+            else:
+                posture_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
+                method = "Angle"
+            
             mid_shoulder = (ls + rs) / 2
             if frame_count % 2 == 0:
                 cv2.line(frame, tuple(ls.astype(int)), tuple(rs.astype(int)), (255, 0, 255), 2)
@@ -446,12 +505,15 @@ def detect_posture():
                 cv2.circle(frame, tuple(mid_mouth.astype(int)), 5, (255, 0, 255), -1)
                 cv2.circle(frame, tuple(ls.astype(int)), 6, (255, 255, 0), -1)
                 cv2.circle(frame, tuple(rs.astype(int)), 6, (255, 255, 0), -1)
-            if smoothed > NECK_THRESHOLD:
-                posture_status = "Bad"
+            
+            method_text = f"Method: {method}"
+            cv2.putText(frame, method_text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            if posture_status == "Bad":
                 display_text = f"BAD: {smoothed:.1f}deg"
+                if face_display.current_state != "angry":
+                    face_display.draw_angry_face()
                 if not study_timer.is_running:
-                    if face_display.current_state != "angry":
-                        face_display.draw_angry_face()
                     led_controller.set_red()
                 if last_bad_time is None:
                     last_bad_time = time.time()
@@ -464,12 +526,11 @@ def detect_posture():
                         last_alert_time = current_time
                         alert_playing = True
             else:
-                posture_status = "Good"
                 display_text = f"GOOD: {smoothed:.1f}deg"
                 led_controller.is_blinking = False
+                if face_display.current_state != "normal":
+                    face_display.draw_normal_face()
                 if not study_timer.is_running:
-                    if face_display.current_state != "normal":
-                        face_display.draw_normal_face()
                     time.sleep(0.1)
                     led_controller.set_yellow()
                 last_bad_time = None
@@ -490,10 +551,18 @@ def detect_posture():
             cv2.putText(frame, last_display_text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, f"Distance: {last_distance_status}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         cv2.putText(frame, last_fps_text, (w-120, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        if use_ml_model:
+            cv2.putText(frame, f"ML Conf: {ml_confidence:.2f}", (w-120, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         if study_timer.is_running:
             time_str = study_timer.get_time_str()
             cv2.putText(frame, f"Timer: {time_str}", (w//2-80, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-        stats.update({'posture_status': posture_status, 'neck_angle': f"{smoothed:.1f}", 'distance_status': distance_status, 'fps': f"{fps:.1f}"})
+        stats.update({
+            'posture_status': posture_status, 
+            'neck_angle': f"{smoothed:.1f}", 
+            'distance_status': distance_status, 
+            'fps': f"{fps:.1f}",
+            'ml_confidence': f"{ml_confidence:.2f}"
+        })
         with lock:
             outputFrame = frame
 
@@ -674,6 +743,7 @@ def index():
                 document.getElementById('angle').textContent = data.neck_angle + '°';
                 document.getElementById('distance').textContent = data.distance_status;
                 document.getElementById('fps').textContent = data.fps;
+                document.getElementById('ml_conf').textContent = data.ml_confidence;
                 const postureEl = document.getElementById('posture');
                 postureEl.className = 'stat-value ' + (data.posture_status === 'Good' ? 'good' : 'bad');
                 const distanceEl = document.getElementById('distance');
@@ -716,6 +786,10 @@ def index():
                 <div class="stat-item">
                   <div class="stat-label">FPS</div>
                   <div class="stat-value" id="fps">-</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">ML Confidence</div>
+                  <div class="stat-value" id="ml_conf">-</div>
                 </div>
               </div>
               <div class="timer-panel">
