@@ -54,8 +54,8 @@ LED_CHANNEL = 0
 
 # Load ML Model 
 try:
-    posture_model = joblib.load("/home/theo/smart-posture-assistant/posture_model.pkl")
-    posture_scaler = joblib.load("/home/theo/smart-posture-assistant/scaler.pkl")
+    posture_model = joblib.load("/home/theo/smart-posture-assistant/models/posture_model.pkl")
+    posture_scaler = joblib.load("/home/theo/smart-posture-assistant/models/scaler.pkl")
     use_ml_model = True
     print("✓ ML Model loaded successfully")
 except Exception as e:

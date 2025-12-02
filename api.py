@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Lightweight OTA API for Smart Posture Assistant
-Pure Python - no external dependencies
+OTA API for Smart Posture Assistant
 """
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -39,7 +38,6 @@ class OTAHandler(BaseHTTPRequestHandler):
         """Health check + version info"""
         if self.path == '/health':
             try:
-                # Get current git commit
                 result = subprocess.run(
                     ['git', 'rev-parse', '--short', 'HEAD'],
                     cwd=str(REPO_DIR),
@@ -49,17 +47,13 @@ class OTAHandler(BaseHTTPRequestHandler):
                 )
                 version = result.stdout.strip()
                 
-                # Check if bot is running
-                pid_file = REPO_DIR / "bot.pid"
-                bot_running = False
-                if pid_file.exists():
-                    try:
-                        pid = int(pid_file.read_text().strip())
-                        # Check if process exists
-                        subprocess.run(['ps', '-p', str(pid)], capture_output=True, check=True)
-                        bot_running = True
-                    except:
-                        pass
+                status_result = subprocess.run(
+                    ['systemctl', 'is-active', 'posture-bot'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                bot_running = status_result.stdout.strip() == 'active'
                 
                 self._send_json({
                     "status": "online",
@@ -77,20 +71,65 @@ class OTAHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "Not found"}, 404)
     
     def do_POST(self):
-        """Trigger OTA update"""
-        if self.path == '/update':
-            # Check authorization
+        """Handle POST requests"""
+        
+        if self.path == '/control':
             auth_header = self.headers.get('Authorization', '')
-            expected_auth = f"Bearer {SECRET}"
+            if auth_header != f"Bearer {SECRET}":
+                self._send_json({"error": "Unauthorized"}, 401)
+                return
             
-            if auth_header != expected_auth:
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(content_length).decode() if content_length > 0 else "{}"
+                data = json.loads(body)
+                action = data.get('action', '')
+                
+                if action not in ['start', 'stop', 'restart', 'status']:
+                    self._send_json({
+                        "error": "Invalid action. Use: start/stop/restart/status"
+                    }, 400)
+                    return
+                
+                result = subprocess.run(
+                    ['sudo', 'systemctl', action, 'posture-bot'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                status_result = subprocess.run(
+                    ['systemctl', 'is-active', 'posture-bot'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                bot_running = status_result.stdout.strip() == 'active'
+                
+                self._send_json({
+                    "success": result.returncode == 0,
+                    "action": action,
+                    "bot_running": bot_running,
+                    "message": f"Bot {action} {'successful' if result.returncode == 0 else 'failed'}"
+                })
+                
+            except subprocess.TimeoutExpired:
+                self._send_json({"error": "Command timeout"}, 500)
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            
+            return
+        
+        elif self.path == '/update':
+            auth_header = self.headers.get('Authorization', '')
+            if auth_header != f"Bearer {SECRET}":
                 self._send_json({
                     "error": "Unauthorized",
                     "hint": "Check UPDATE_SECRET environment variable"
                 }, 401)
                 return
             
-            # Trigger update
             try:
                 result = subprocess.run(
                     [str(UPDATE_SCRIPT)],
@@ -102,7 +141,6 @@ class OTAHandler(BaseHTTPRequestHandler):
                 
                 output = result.stdout.strip()
                 
-                # Parse output
                 if "NO_UPDATE" in output:
                     self._send_json({
                         "success": True,
@@ -110,7 +148,6 @@ class OTAHandler(BaseHTTPRequestHandler):
                         "message": "Already up to date"
                     })
                 elif "SUCCESS" in output:
-                    # Extract new version from output
                     new_version = "unknown"
                     if "SUCCESS:" in output:
                         new_version = output.split("SUCCESS:")[1].strip()
@@ -125,7 +162,7 @@ class OTAHandler(BaseHTTPRequestHandler):
                     self._send_json({
                         "success": False,
                         "message": "Update script failed",
-                        "output": output[-300:]  # Last 300 chars
+                        "output": output[-300:]
                     }, 500)
                     
             except subprocess.TimeoutExpired:
@@ -142,25 +179,28 @@ class OTAHandler(BaseHTTPRequestHandler):
                 self._send_json({
                     "error": str(e)
                 }, 500)
+        
         else:
             self._send_json({"error": "Not found"}, 404)
 
 def run(port=PORT):
     server = HTTPServer(('0.0.0.0', port), OTAHandler)
     print("=" * 60)
-    print("🚀 OTA Update API Started")
+    print("OTA Update API Started")
     print("=" * 60)
     print(f"   Port: {port}")
     print(f"   Health: http://0.0.0.0:{port}/health")
     print(f"   Update: POST http://0.0.0.0:{port}/update")
+    print(f"   Control: POST http://0.0.0.0:{port}/control")
     print(f"   Secret: {SECRET}")
     print("=" * 60)
     
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nServer stopped!")
+        print("\n🛑 Server stopped")
         server.shutdown()
 
 if __name__ == '__main__':
     run()
+
