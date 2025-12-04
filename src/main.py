@@ -18,19 +18,20 @@ from rpi_ws281x import PixelStrip, Color
 import joblib
 from utils import extract_features_41, get_feature_names_41, validate_keypoints
 
+# ==========================================
+# 1. INITIALIZATION & CONSTANTS
+# ==========================================
+
 def init_audio():
     try:
-        subprocess.run(['amixer', 'set', 'Master', '100%'],
-                       check=False, capture_output=True)
-        subprocess.run(['amixer', 'set', 'PCM', '100%'],
-                       check=False, capture_output=True)
+        subprocess.run(['amixer', 'set', 'Master', '100%'], check=False, capture_output=True)
+        subprocess.run(['amixer', 'set', 'PCM', '100%'], check=False, capture_output=True)
         result = subprocess.run(['which', 'mpg123'], capture_output=True)
         if result.returncode != 0:
             return False
         return True
     except:
         return False
-
 
 audio_available = init_audio()
 
@@ -39,14 +40,25 @@ try:
 except:
     from tensorflow.lite.python.interpreter import Interpreter
 
+# Path Configuration
 MODEL_PATH = "/home/theo/4.tflite"
+ENSEMBLE_MODEL = "/home/theo/smart-posture-assistant/models/posture_ensemble.pkl"
+ENSEMBLE_SCALER = "/home/theo/smart-posture-assistant/models/posture_scaler.pkl"
+METADATA_PATH = "/home/theo/smart-posture-assistant/models/model_metadata.pkl"
+
+# Parameters
 CAMERA_ID = 0
-NECK_THRESHOLD = 35
-SMOOTHING_FRAMES = 7
-BAD_DURATION_TO_ALERT = 2.0
+NECK_THRESHOLD = 35 
+SMOOTHING_FRAMES = 15  
+BAD_DURATION_TO_ALERT = 2.0 
+ML_CONFIDENCE_THRESHOLD = 0.75 
+STATUS_BUFFER_SIZE = 15 
+BAD_VOTE_REQUIRED = 10 
 INFER_THREADS = 2
 FACE_TOO_CLOSE_RATIO = 0.35
 FACE_TOO_FAR_RATIO = 0.08
+
+# Hardware Params
 LED_COUNT = 12
 LED_PIN = 12
 LED_BRIGHTNESS = 20
@@ -55,10 +67,15 @@ LED_DMA = 10
 LED_INVERT = False
 LED_CHANNEL = 0
 
-# Load ML Model
-ENSEMBLE_MODEL = "/home/theo/smart-posture-assistant/models/posture_ensemble.pkl"
-ENSEMBLE_SCALER = "/home/theo/smart-posture-assistant/models/posture_scaler.pkl"
+# Global Buffers
+angle_buf = deque(maxlen=SMOOTHING_FRAMES)
+status_buffer = deque(maxlen=STATUS_BUFFER_SIZE) # Fixed: Initialized globally
+rolling_buffers = {
+    'neck_angle': deque(maxlen=5),
+    'head_tilt': deque(maxlen=5)
+}
 
+# Load ML Models
 use_ml_model = False
 posture_model = None
 posture_scaler = None
@@ -66,20 +83,15 @@ posture_scaler = None
 try:
     posture_model = joblib.load(ENSEMBLE_MODEL)
     posture_scaler = joblib.load(ENSEMBLE_SCALER)
+    posture_meta = joblib.load(METADATA_PATH)
+    posture_features = posture_meta["features"]
     use_ml_model = True
     print("✓ Ensemble ML Model loaded successfully")
 except Exception as e:
-    print(f"⚠ ML Model not found or failed to load: {e}")
-    posture_model = None
-    posture_scaler = None
+    print(f"⚠ ML Model error: {e}")
     use_ml_model = False
 
-# Rolling buffers for 2 dynamic features (window=5)
-rolling_buffers = {
-    'neck_angle': deque(maxlen=5),
-    'head_tilt': deque(maxlen=5)
-}
-
+# TFLite Setup
 interpreter = Interpreter(MODEL_PATH, num_threads=INFER_THREADS)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
@@ -88,6 +100,7 @@ input_dtype = input_details[0]['dtype']
 in_h = input_details[0]['shape'][1]
 in_w = input_details[0]['shape'][2]
 
+# Hardware Init
 try:
     i2c = busio.I2C(SCL, SDA)
     oled = SSD1306_I2C(128, 64, i2c)
@@ -95,25 +108,21 @@ try:
     oled.show()
 except Exception as e:
     oled = None
-    print(f"OLED display error: {e}")
+    print(f"OLED error: {e}")
 
 try:
-    strip = PixelStrip(
-        LED_COUNT,
-        LED_PIN,
-        LED_FREQ_HZ,
-        LED_DMA,
-        LED_INVERT,
-        LED_BRIGHTNESS,
-        LED_CHANNEL)
+    strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
     strip.begin()
     for i in range(LED_COUNT):
         strip.setPixelColor(i, Color(0, 0, 0))
     strip.show()
 except Exception as e:
     strip = None
-    print(f"LED strip error: {e}")
+    print(f"LED error: {e}")
 
+# ==========================================
+# 2. HELPER CLASSES
+# ==========================================
 
 class StudyTimer:
     def __init__(self):
@@ -167,9 +176,7 @@ class StudyTimer:
             secs = int(self.remaining % 60)
             return f"{mins:02d}:{secs:02d}"
 
-
 study_timer = StudyTimer()
-
 
 class FaceDisplay:
     def __init__(self, oled_display):
@@ -177,8 +184,7 @@ class FaceDisplay:
         self.current_state = "normal"
 
     def draw_normal_face(self):
-        if not self.oled:
-            return
+        if not self.oled: return
         image = Image.new("1", (128, 64))
         draw = ImageDraw.Draw(image)
         draw.ellipse((30, 15, 50, 35), outline=255, fill=0)
@@ -191,8 +197,7 @@ class FaceDisplay:
         self.current_state = "normal"
 
     def draw_angry_face(self):
-        if not self.oled:
-            return
+        if not self.oled: return
         image = Image.new("1", (128, 64))
         draw = ImageDraw.Draw(image)
         draw.line((25, 15, 45, 20), fill=255, width=2)
@@ -207,27 +212,22 @@ class FaceDisplay:
         self.current_state = "angry"
 
     def draw_timer(self, time_str):
-        if not self.oled:
-            return
+        if not self.oled: return
         image = Image.new("1", (128, 64))
         draw = ImageDraw.Draw(image)
         try:
-            font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 32)
         except:
             font = ImageFont.load_default()
         bbox = draw.textbbox((0, 0), time_str, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        x = (128 - text_width) // 2
-        y = (64 - text_height) // 2
+        x = (128 - (bbox[2] - bbox[0])) // 2
+        y = (64 - (bbox[3] - bbox[1])) // 2
         draw.text((x, y), time_str, font=font, fill=255)
         self.oled.image(image)
         self.oled.show()
 
     def blink(self):
-        if not self.oled:
-            return
+        if not self.oled: return
         image = Image.new("1", (128, 64))
         draw = ImageDraw.Draw(image)
         draw.line((30, 25, 50, 25), fill=255, width=2)
@@ -239,7 +239,6 @@ class FaceDisplay:
         self.oled.image(image)
         self.oled.show()
 
-
 class LEDController:
     def __init__(self, led_strip):
         self.strip = led_strip
@@ -248,8 +247,7 @@ class LEDController:
         self.lock = threading.Lock()
 
     def set_color(self, r, g, b):
-        if not self.strip:
-            return
+        if not self.strip: return
         with self.lock:
             for i in range(LED_COUNT):
                 self.strip.setPixelColor(i, Color(g, r, b))
@@ -260,73 +258,68 @@ class LEDController:
         self.set_color(255, 200, 0)
 
     def set_red(self):
-        self.set_color(255, 0, 0)
+        self.set_color(0, 255, 0)
 
     def pulse_while_speaking(self, duration=4):
-        if not self.strip:
-            return
+        if not self.strip: return
         self.is_blinking = True
         start_time = time.time()
         base_color = self.current_color
         while time.time() - start_time < duration and self.is_blinking:
             for brightness in range(30, 100, 15):
-                if not self.is_blinking:
-                    break
+                if not self.is_blinking: break
                 with self.lock:
                     for i in range(LED_COUNT):
                         r, g, b = base_color
                         dimmed_r = int(r * brightness / 100)
                         dimmed_g = int(g * brightness / 100)
                         dimmed_b = int(b * brightness / 100)
-                        self.strip.setPixelColor(
-                            i, Color(dimmed_g, dimmed_r, dimmed_b))
+                        self.strip.setPixelColor(i, Color(dimmed_g, dimmed_r, dimmed_b))
                     self.strip.show()
                 time.sleep(0.05)
             for brightness in range(100, 30, -15):
-                if not self.is_blinking:
-                    break
+                if not self.is_blinking: break
                 with self.lock:
                     for i in range(LED_COUNT):
                         r, g, b = base_color
                         dimmed_r = int(r * brightness / 100)
                         dimmed_g = int(g * brightness / 100)
                         dimmed_b = int(b * brightness / 100)
-                        self.strip.setPixelColor(
-                            i, Color(dimmed_g, dimmed_r, dimmed_b))
+                        self.strip.setPixelColor(i, Color(dimmed_g, dimmed_r, dimmed_b))
                     self.strip.show()
                 time.sleep(0.05)
         self.set_color(*base_color)
         self.is_blinking = False
 
-
 face_display = FaceDisplay(oled)
 led_controller = LEDController(strip)
+if oled: face_display.draw_normal_face()
+if strip: led_controller.set_yellow()
 
-if oled:
-    face_display.draw_normal_face()
-if strip:
-    led_controller.set_yellow()
-
+# ==========================================
+# 3. UTILITY FUNCTIONS
+# ==========================================
 
 def calculate_neck_angle(left_shoulder, right_shoulder, mouth):
     shoulder_vector = right_shoulder - left_shoulder
     mid_shoulder = (left_shoulder + right_shoulder) / 2
     neck_vector = mouth - mid_shoulder
     dot_product = np.dot(shoulder_vector, neck_vector)
-    norm_product = np.linalg.norm(
-        shoulder_vector) * np.linalg.norm(neck_vector)
-    if norm_product == 0:
-        return 0
+    norm_product = np.linalg.norm(shoulder_vector) * np.linalg.norm(neck_vector)
+    if norm_product == 0: return 0
     cosine_angle = np.clip(dot_product / norm_product, -1.0, 1.0)
     angle_rad = np.arccos(cosine_angle)
     angle_deg = np.degrees(angle_rad)
-    neck_angle = abs(90 - angle_deg)
-    return neck_angle
+    return abs(90 - angle_deg)
 
+def calculate_head_tilt(left_eye, right_eye):
+    dx = right_eye[0] - left_eye[0]
+    dy = right_eye[1] - left_eye[1]
+    if dx == 0: return 0.0
+    return math.degrees(math.atan2(dy, dx))
 
 TTS_CACHE_DIR = "/tmp/tts_cache"
 os.makedirs(TTS_CACHE_DIR, exist_ok=True)
-
 
 def get_cached_tts(message):
     import hashlib
@@ -336,28 +329,6 @@ def get_cached_tts(message):
         tts = gTTS(text=message, lang='vi', slow=False)
         tts.save(cache_file)
     return cache_file
-
-
-def speak_alert(message):
-    if not audio_available:
-        return
-
-    def _speak():
-        try:
-            tts_file = get_cached_tts(message)
-            led_thread = threading.Thread(
-                target=led_controller.pulse_while_speaking, args=(5,), daemon=True)
-            led_thread.start()
-            blink_thread = threading.Thread(
-                target=blink_while_speaking, args=(5,), daemon=True)
-            blink_thread.start()
-            subprocess.run(['mpg123', tts_file], capture_output=True)
-            time.sleep(0.5)
-            led_controller.is_blinking = False
-        except:
-            pass
-    threading.Thread(target=_speak, daemon=True).start()
-
 
 def blink_while_speaking(duration):
     start_time = time.time()
@@ -370,14 +341,27 @@ def blink_while_speaking(duration):
             face_display.draw_angry_face()
         time.sleep(0.3)
 
+def speak_alert(message):
+    if not audio_available: return
+    def _speak():
+        try:
+            tts_file = get_cached_tts(message)
+            led_thread = threading.Thread(target=led_controller.pulse_while_speaking, args=(5,), daemon=True)
+            led_thread.start()
+            blink_thread = threading.Thread(target=blink_while_speaking, args=(5,), daemon=True)
+            blink_thread.start()
+            subprocess.run(['mpg123', tts_file], capture_output=True)
+            time.sleep(0.5)
+            led_controller.is_blinking = False
+        except: pass
+    threading.Thread(target=_speak, daemon=True).start()
 
 def timer_updater():
     last_update = 0
     while True:
         if study_timer.update():
             speak_alert("Hết giờ học rồi, hãy nghỉ giải lao nhé")
-            if oled:
-                face_display.draw_normal_face()
+            if oled: face_display.draw_normal_face()
         current_time = time.time()
         if study_timer.is_running and oled and current_time - last_update >= 1:
             time_str = study_timer.get_time_str()
@@ -386,8 +370,10 @@ def timer_updater():
             last_update = current_time
         time.sleep(0.5)
 
+# ==========================================
+# 4. MAIN APPLICATION
+# ==========================================
 
-angle_buf = deque(maxlen=SMOOTHING_FRAMES)
 last_bad_time = None
 alert_playing = False
 last_alert_time = 0
@@ -399,8 +385,7 @@ ALERT_MESSAGES = [
 alert_index = 0
 
 cap = cv2.VideoCapture(CAMERA_ID)
-if not cap.isOpened():
-    sys.exit(1)
+if not cap.isOpened(): sys.exit(1)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 cap.set(cv2.CAP_PROP_FPS, 30)
@@ -420,21 +405,11 @@ last_display_text = ""
 last_distance_status = "OK"
 last_fps_text = ""
 
-# Pre-cache TTS messages
+# Cache alerts
 for msg in ALERT_MESSAGES:
-    try:
-        get_cached_tts(msg)
-    except:
-        pass
-get_cached_tts("Bạn đang ngồi quá gần màn hình, hãy lùi ra xa một chút")
-get_cached_tts("Hết giờ học rồi, hãy nghỉ giải lao nhé")
-get_cached_tts("Đã bắt đầu học 15 phút")
-get_cached_tts("Đã bắt đầu học 30 phút")
-get_cached_tts("Đã bắt đầu học 45 phút")
-get_cached_tts("Đã tạm dừng")
-get_cached_tts("Tiếp tục nào")
-get_cached_tts("Đã dừng")
-
+    try: get_cached_tts(msg)
+    except: pass
+get_cached_tts("Bạn đang ngồi quá gần màn hình")
 
 def detect_posture():
     global outputFrame, last_bad_time, alert_playing
@@ -447,8 +422,7 @@ def detect_posture():
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            continue
+        if not ret: continue
         
         frame_count += 1
         h, w, _ = frame.shape
@@ -456,8 +430,7 @@ def detect_posture():
         img_resized = cv2.resize(img, (in_w, in_h), interpolation=cv2.INTER_NEAREST)
         
         if input_dtype == np.float32:
-            inp = img_resized.astype(np.float32)
-            inp = (inp - 127.5) / 127.5
+            inp = (img_resized.astype(np.float32) - 127.5) / 127.5
             inp = np.expand_dims(inp, axis=0)
         else:
             inp = np.expand_dims(img_resized.astype(input_dtype), axis=0)
@@ -467,7 +440,7 @@ def detect_posture():
         output_data = interpreter.get_tensor(output_details[0]['index'])
         kpts = output_data[0][0] if output_data.ndim == 4 else output_data[0]
         
-        # Extract keypoints
+        # Extract basic keypoints
         nose = np.array([kpts[0][1] * w, kpts[0][0] * h])
         s0 = kpts[0][2]
         left_eye = np.array([kpts[1][1] * w, kpts[1][0] * h])
@@ -484,10 +457,9 @@ def detect_posture():
         s2 = kpts[6][2]
         
         min_conf = 0.25
-        key_scores = [s0, s1, s2, s_le, s_re]
         distance_status = "OK"
         
-        # Calculate face distance
+        # 1. Distance Check
         if s0 > min_conf:
             if s_lear > min_conf and s_rear > min_conf:
                 face_width = np.linalg.norm(lear - rear)
@@ -499,48 +471,55 @@ def detect_posture():
                 distance_status = "TOO CLOSE"
                 current_time = time.time()
                 if current_time - last_alert_time > 15:
-                    speak_alert("Bạn đang ngồi quá gần màn hình, hãy lùi ra xa một chút")
+                    speak_alert("Bạn đang ngồi quá gần màn hình")
                     last_alert_time = current_time
             elif face_ratio < FACE_TOO_FAR_RATIO:
                 distance_status = "Too far"
         
-        # Check if enough keypoints are visible
-        if sum(s > min_conf for s in key_scores) < 3:
+        # 2. Posture Logic
+        if sum(s > min_conf for s in [s0, s1, s2, s_le, s_re]) < 3:
+            raw_status = "Good" # Default to good if unknown
             posture_status = "Unknown"
             smoothed = 0
             display_text = "No person"
             ml_confidence = 0
             method = "Unknown"
         else:
-            # Calculate mouth position
+            # Mouth estimation
             if s_le > min_conf and s_re > min_conf:
-                eye_distance = np.linalg.norm(left_eye - right_eye)
-                mouth_offset_y = eye_distance * 0.6
-                mid_mouth = nose + np.array([0, mouth_offset_y])
+                mid_mouth = nose + np.array([0, np.linalg.norm(left_eye - right_eye) * 0.6])
             elif s_lear > min_conf and s_rear > min_conf:
-                ear_distance = np.linalg.norm(lear - rear)
-                mouth_offset_y = ear_distance * 0.4
-                mid_mouth = nose + np.array([0, mouth_offset_y])
+                mid_mouth = nose + np.array([0, np.linalg.norm(lear - rear) * 0.4])
             else:
                 mid_mouth = nose + np.array([0, np.linalg.norm(ls - rs) * 0.4])
             
-            # Calculate neck angle
+            # Calculate Angles & Smoothing
             angle_val = calculate_neck_angle(ls, rs, mid_mouth)
             angle_buf.append(angle_val)
-            smoothed = float(np.mean(angle_buf)) if angle_buf else 0
+            smoothed = float(np.mean(angle_buf)) if angle_buf else angle_val
             
-            # ML prediction
+            head_tilt_val = calculate_head_tilt(left_eye, right_eye)
+            
+            # Update rolling buffers for Feature Extraction
+            rolling_buffers["neck_angle"].append(smoothed) # Feed smoothed angle
+            rolling_buffers["head_tilt"].append(head_tilt_val)
+            
             ml_confidence = 0.0
-            if use_ml_model and posture_model is not None and validate_keypoints(kpts, min_confidence=0.25):
+            
+            if use_ml_model and posture_model and validate_keypoints(kpts, min_confidence=0.25):
                 try:
-                    # Extract 41 features
-                    features = extract_features_41(kpts, w, h, buffers=rolling_buffers, window=5)
-                    features_array = np.array(features, dtype=float).reshape(1, -1)
+                    raw_features = extract_features_41(kpts, w, h, buffers=rolling_buffers, window=5)
+                    feat_dict = dict(zip(get_feature_names_41(), raw_features))
                     
-                    # Scale features
+                    # Force overwrite sensitive features with smoothed values
+                    feat_dict['neck_angle_deg'] = smoothed
+                    feat_dict['neck_angle_abs'] = abs(smoothed)
+                    feat_dict['neck_angle_by_face'] = smoothed * feat_dict['face_size_ratio']
+                    
+                    ordered_feat = [feat_dict[f] for f in posture_features]
+                    features_array = np.array(ordered_feat, dtype=float).reshape(1, -1)
                     features_scaled = posture_scaler.transform(features_array)
                     
-                    # Predict
                     ml_prediction = posture_model.predict(features_scaled)[0]
                     
                     try:
@@ -549,7 +528,6 @@ def detect_posture():
                     except:
                         ml_confidence = 0.0
                     
-                    # Smoothing ML output
                     ml_prediction_buf.append(ml_prediction)
                     if len(ml_prediction_buf) >= 3:
                         from collections import Counter
@@ -557,48 +535,61 @@ def detect_posture():
                     else:
                         final_prediction = ml_prediction
                     
-                    # Use ML if confident
-                    if ml_confidence >= 0.65:
-                        posture_status = "Good" if final_prediction == 1 else "Bad"
-                        method = "ML"
+                    # --- VETO LOGIC (PHYSICS vs AI) ---
+                    if smoothed <= 25.0:
+                        raw_status = "Good"
+                        method = "Physics(Safe)"
+                        ml_confidence = 0.0 
+                    elif smoothed >= 45.0:
+                        raw_status = "Bad"
+                        method = "Physics(Bad)"
                     else:
-                        posture_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
-                        method = "Angle"
-                        
+                        # Gray Area (25-45 deg): Trust AI only if confident
+                        if ml_confidence >= ML_CONFIDENCE_THRESHOLD:
+                            raw_status = "Good" if final_prediction == "good" else "Bad"
+                            method = f"AI({ml_confidence:.2f})"
+                        else:
+                            raw_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
+                            method = "Angle(Fallback)"
+                            
                 except Exception as e:
-                    print(f"ML prediction error: {e}")
-                    posture_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
-                    method = "Angle (fallback)"
+                    print(f"ML Error: {e}")
+                    raw_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
+                    method = "ErrorFallback"
             else:
-                posture_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
-                method = "Angle"
+                raw_status = "Good" if smoothed <= NECK_THRESHOLD else "Bad"
+                method = "AngleOnly"
+
+            # --- STATUS BUFFER VOTING ---
+            status_buffer.append(raw_status)
+            bad_votes = status_buffer.count("Bad")
+            required_bad = int(STATUS_BUFFER_SIZE * 0.7)
             
-            # Draw skeleton (every other frame for performance)
+            if bad_votes >= required_bad:
+                posture_status = "Bad"
+            else:
+                posture_status = "Good"
+
+            # Draw Skeleton
             if frame_count % 2 == 0:
                 mid_shoulder = (ls + rs) / 2
                 cv2.line(frame, tuple(ls.astype(int)), tuple(rs.astype(int)), (255, 0, 255), 2)
                 cv2.line(frame, tuple(mid_shoulder.astype(int)), tuple(mid_mouth.astype(int)), (0, 255, 0), 3)
-                cv2.circle(frame, tuple(mid_shoulder.astype(int)), 5, (0, 255, 255), -1)
-                cv2.circle(frame, tuple(mid_mouth.astype(int)), 5, (255, 0, 255), -1)
                 cv2.circle(frame, tuple(ls.astype(int)), 6, (255, 255, 0), -1)
                 cv2.circle(frame, tuple(rs.astype(int)), 6, (255, 255, 0), -1)
             
             display_text = f"BAD: {smoothed:.1f}deg" if posture_status == "Bad" else f"GOOD: {smoothed:.1f}deg"
-        
-        # Display method text
+
+        # UI Updates
         method_text = f"Method: {method}"
         cv2.putText(frame, method_text, (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         
-        # Handle posture status
         if posture_status == "Bad":
-            if face_display.current_state != "angry":
-                face_display.draw_angry_face()
-            if not study_timer.is_running:
-                led_controller.set_red()
-            if last_bad_time is None:
-                last_bad_time = time.time()
-            elapsed = time.time() - last_bad_time
-            if elapsed >= BAD_DURATION_TO_ALERT:
+            if face_display.current_state != "angry": face_display.draw_angry_face()
+            if not study_timer.is_running: led_controller.set_red()
+            
+            if last_bad_time is None: last_bad_time = time.time()
+            if time.time() - last_bad_time >= BAD_DURATION_TO_ALERT:
                 current_time = time.time()
                 if current_time - last_alert_time > 10:
                     speak_alert(ALERT_MESSAGES[alert_index])
@@ -607,45 +598,29 @@ def detect_posture():
                     alert_playing = True
         elif posture_status == "Good":
             led_controller.is_blinking = False
-            if face_display.current_state != "normal":
-                face_display.draw_normal_face()
+            if face_display.current_state != "normal": face_display.draw_normal_face()
             if not study_timer.is_running:
                 time.sleep(0.1)
                 led_controller.set_yellow()
             last_bad_time = None
             alert_playing = False
         
-        # Calculate FPS
+        # Stats & Overlay
         elapsed_time = time.time() - start_time
         fps = frame_count / elapsed_time if elapsed_time > 0 else 0
+        if display_text != last_display_text: last_display_text = display_text
+        if distance_status != last_distance_status: last_distance_status = distance_status
+        if frame_count % 5 == 0: last_fps_text = f"FPS: {fps:.1f}"
         
-        # Update display text if changed
-        if display_text != last_display_text:
-            last_display_text = display_text
-        if distance_status != last_distance_status:
-            last_distance_status = distance_status
-        if frame_count % 5 == 0:
-            last_fps_text = f"FPS: {fps:.1f}"
-        
-        # Draw text on frame
-        if posture_status == "Bad":
-            cv2.putText(frame, last_display_text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        elif posture_status == "Good":
-            cv2.putText(frame, last_display_text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        else:
-            cv2.putText(frame, last_display_text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        
-        cv2.putText(frame, f"Distance: {last_distance_status}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        color = (0, 0, 255) if posture_status == "Bad" else (0, 255, 0)
+        cv2.putText(frame, last_display_text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(frame, f"Dist: {last_distance_status}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         cv2.putText(frame, last_fps_text, (w-120, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        
         if use_ml_model:
-            cv2.putText(frame, f"ML Conf: {ml_confidence:.2f}", (w-120, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-        
+            cv2.putText(frame, f"Conf: {ml_confidence:.2f}", (w-120, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
         if study_timer.is_running:
-            time_str = study_timer.get_time_str()
-            cv2.putText(frame, f"Timer: {time_str}", (w//2-80, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+            cv2.putText(frame, f"Timer: {study_timer.get_time_str()}", (w//2-80, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
         
-        # Update stats
         stats.update({
             'posture_status': posture_status, 
             'neck_angle': f"{smoothed:.1f}", 
@@ -657,7 +632,6 @@ def detect_posture():
         with lock:
             outputFrame = frame
 
-
 def generate():
     global outputFrame, lock
     while True:
@@ -667,20 +641,16 @@ def generate():
                 continue
             frame = outputFrame
         (flag, encodedImage) = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 55])
-        if not flag:
-            continue
+        if not flag: continue
         yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + bytearray(encodedImage) + b'\r\n')
-
 
 @app.route("/video_feed")
 def video_feed():
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
-
 @app.route("/stats")
 def get_stats():
     return jsonify(stats)
-
 
 @app.route("/command", methods=['POST'])
 def command():
@@ -704,10 +674,8 @@ def command():
     elif cmd == 'stop':
         study_timer.stop()
         speak_alert("Đã dừng")
-        if oled:
-            face_display.draw_normal_face()
+        if oled: face_display.draw_normal_face()
     return jsonify({'success': True})
-
 
 @app.route("/")
 def index():
@@ -716,125 +684,28 @@ def index():
       <head>
         <title>Smart Posture Assistant</title>
         <style>
-          body {
-            background-color: #1a1a1a;
-            color: #ffffff;
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-          }
-          .container {
-            max-width: 1400px;
-            margin: 0 auto;
-          }
-          h1 {
-            text-align: center;
-            color: #00ff88;
-            margin-bottom: 30px;
-          }
-          .content {
-            display: flex;
-            gap: 20px;
-            flex-wrap: wrap;
-          }
-          .video-container {
-            flex: 1;
-            min-width: 640px;
-          }
-          .video-container img {
-            width: 100%;
-            height: auto;
-            border-radius: 10px;
-            box-shadow: 0 4px 20px rgba(0,255,136,0.3);
-          }
-          .side-panel {
-            flex: 0 0 350px;
-          }
-          .stats-panel {
-            background: #2a2a2a;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-            margin-bottom: 20px;
-          }
-          .timer-panel {
-            background: #2a2a2a;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-          }
-          .stat-item {
-            padding: 15px;
-            margin: 10px 0;
-            background: #333;
-            border-radius: 5px;
-            border-left: 4px solid #00ff88;
-          }
-          .stat-label {
-            font-size: 14px;
-            color: #aaa;
-            margin-bottom: 5px;
-          }
-          .stat-value {
-            font-size: 24px;
-            font-weight: bold;
-            color: #00ff88;
-          }
-          .timer-btn {
-            width: 100%;
-            padding: 15px;
-            margin: 10px 0;
-            font-size: 16px;
-            font-weight: bold;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.3s;
-          }
-          .btn-start {
-            background: #00ff88;
-            color: #000;
-          }
-          .btn-start:hover {
-            background: #00dd77;
-            transform: scale(1.02);
-          }
-          .btn-control {
-            background: #3a3a3a;
-            color: #fff;
-          }
-          .btn-control:hover {
-            background: #4a4a4a;
-          }
-          .btn-stop {
-            background: #ff4444;
-            color: #fff;
-          }
-          .btn-stop:hover {
-            background: #dd3333;
-          }
-          .info {
-            margin-top: 15px;
-            padding: 15px;
-            background: #2a2a2a;
-            border-radius: 5px;
-            font-size: 13px;
-            color: #aaa;
-          }
+          body { background-color: #1a1a1a; color: #ffffff; font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+          .container { max-width: 1400px; margin: 0 auto; }
+          h1 { text-align: center; color: #00ff88; margin-bottom: 30px; }
+          .content { display: flex; gap: 20px; flex-wrap: wrap; }
+          .video-container { flex: 1; min-width: 640px; }
+          .video-container img { width: 100%; border-radius: 10px; box-shadow: 0 4px 20px rgba(0,255,136,0.3); }
+          .side-panel { flex: 0 0 350px; }
+          .stats-panel, .timer-panel { background: #2a2a2a; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+          .stat-item { padding: 15px; margin: 10px 0; background: #333; border-radius: 5px; border-left: 4px solid #00ff88; }
+          .stat-label { font-size: 14px; color: #aaa; margin-bottom: 5px; }
+          .stat-value { font-size: 24px; font-weight: bold; color: #00ff88; }
+          .timer-btn { width: 100%; padding: 15px; margin: 10px 0; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; }
+          .btn-start { background: #00ff88; color: #000; }
+          .btn-control { background: #3a3a3a; color: #fff; }
+          .btn-stop { background: #ff4444; color: #fff; }
           .good { color: #00ff88 !important; }
           .bad { color: #ff4444 !important; }
           .warning { color: #ff8800 !important; }
-          h2 {
-            margin-top: 0;
-            color: #00ff88;
-            font-size: 20px;
-          }
         </style>
         <script>
           function updateStats() {
-            fetch('/stats')
-              .then(r => r.json())
-              .then(data => {
+            fetch('/stats').then(r => r.json()).then(data => {
                 document.getElementById('posture').textContent = data.posture_status;
                 document.getElementById('angle').textContent = data.neck_angle + '°';
                 document.getElementById('distance').textContent = data.distance_status;
@@ -844,14 +715,10 @@ def index():
                 postureEl.className = 'stat-value ' + (data.posture_status === 'Good' ? 'good' : 'bad');
                 const distanceEl = document.getElementById('distance');
                 distanceEl.className = 'stat-value ' + (data.distance_status === 'OK' ? 'good' : 'warning');
-              });
+            });
           }
           function sendCommand(cmd) {
-            fetch('/command', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({command: cmd})
-            });
+            fetch('/command', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({command: cmd})});
           }
           setInterval(updateStats, 1000);
           window.onload = updateStats;
@@ -861,49 +728,23 @@ def index():
         <div class="container">
           <h1>Smart Posture Assistant</h1>
           <div class="content">
-            <div class="video-container">
-              <img src="/video_feed" />
-            </div>
+            <div class="video-container"><img src="/video_feed" /></div>
             <div class="side-panel">
               <div class="stats-panel">
                 <h2>Status</h2>
-                <div class="stat-item">
-                  <div class="stat-label">Posture</div>
-                  <div class="stat-value" id="posture">-</div>
-                </div>
-                <div class="stat-item">
-                  <div class="stat-label">Neck Angle</div>
-                  <div class="stat-value" id="angle">-</div>
-                </div>
-                <div class="stat-item">
-                  <div class="stat-label">Distance</div>
-                  <div class="stat-value" id="distance">-</div>
-                </div>
-                <div class="stat-item">
-                  <div class="stat-label">FPS</div>
-                  <div class="stat-value" id="fps">-</div>
-                </div>
-                <div class="stat-item">
-                  <div class="stat-label">ML Confidence</div>
-                  <div class="stat-value" id="ml_conf">-</div>
-                </div>
+                <div class="stat-item"><div class="stat-label">Posture</div><div class="stat-value" id="posture">-</div></div>
+                <div class="stat-item"><div class="stat-label">Neck Angle</div><div class="stat-value" id="angle">-</div></div>
+                <div class="stat-item"><div class="stat-label">Distance</div><div class="stat-value" id="distance">-</div></div>
+                <div class="stat-item"><div class="stat-label">FPS</div><div class="stat-value" id="fps">-</div></div>
+                <div class="stat-item"><div class="stat-label">ML Conf</div><div class="stat-value" id="ml_conf">-</div></div>
               </div>
               <div class="timer-panel">
                 <h2>Study Timer</h2>
                 <button class="timer-btn btn-start" onclick="sendCommand('start_15')">Start 15 min</button>
                 <button class="timer-btn btn-start" onclick="sendCommand('start_30')">Start 30 min</button>
-                <button class="timer-btn btn-start" onclick="sendCommand('start_45')">Start 45 min</button>
                 <button class="timer-btn btn-control" onclick="sendCommand('pause')">Pause</button>
                 <button class="timer-btn btn-control" onclick="sendCommand('resume')">Resume</button>
                 <button class="timer-btn btn-stop" onclick="sendCommand('stop')">Stop</button>
-                <div class="info">
-                  <strong>Instructions:</strong><br>
-                  - Neck angle ≤ 35°: Good posture<br>
-                  - OLED: Happy/Angry face<br>
-                  - LED: Yellow (good) / Red (bad)<br>
-                  - LED blinks during alert<br>
-                  - Take breaks every 30 minutes
-                </div>
               </div>
             </div>
           </div>
@@ -911,7 +752,6 @@ def index():
       </body>
     </html>
     """
-
 
 if __name__ == '__main__':
     print("Starting Smart Posture Assistant...")
@@ -924,8 +764,7 @@ if __name__ == '__main__':
         app.run(host="0.0.0.0", port=5000, debug=False, threaded=True, use_reloader=False)
     finally:
         if strip:
-            for i in range(LED_COUNT):
-                strip.setPixelColor(i, Color(0, 0, 0))
+            for i in range(LED_COUNT): strip.setPixelColor(i, Color(0, 0, 0))
             strip.show()
         if oled:
             oled.fill(0)
