@@ -29,7 +29,7 @@ except ImportError:
 
 # Configuration
 MODEL_PATH = "/home/theo/4.tflite"
-CAMERA_ID = 0
+CAMERA_ID = 1
 DATA_FILE = "../data/posture_data.csv"  # Use parent directory
 MIN_CONFIDENCE = 0.2
 
