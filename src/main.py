@@ -17,6 +17,7 @@ from adafruit_ssd1306 import SSD1306_I2C
 from rpi_ws281x import PixelStrip, Color
 import joblib
 from utils import extract_features_41, get_feature_names_41, validate_keypoints
+from config_manager import config_mgr
 
 # ==========================================
 # 1. INITIALIZATION & CONSTANTS
@@ -49,11 +50,11 @@ METADATA_PATH = "/home/theo/smart-posture-assistant/models/model_metadata.pkl"
 # Parameters
 CAMERA_ID = 0
 NECK_THRESHOLD = 35 
-SMOOTHING_FRAMES = 15  
-BAD_DURATION_TO_ALERT = 2.0 
+SMOOTHING_FRAMES = 6  
+BAD_DURATION_TO_ALERT = 1.0 
 ML_CONFIDENCE_THRESHOLD = 0.75 
-STATUS_BUFFER_SIZE = 15 
-BAD_VOTE_REQUIRED = 10 
+STATUS_BUFFER_SIZE = 8
+BAD_VOTE_REQUIRED =5 
 INFER_THREADS = 2
 FACE_TOO_CLOSE_RATIO = 0.35
 FACE_TOO_FAR_RATIO = 0.08
@@ -544,7 +545,6 @@ def detect_posture():
                         raw_status = "Bad"
                         method = "Physics(Bad)"
                     else:
-                        # Gray Area (25-45 deg): Trust AI only if confident
                         if ml_confidence >= ML_CONFIDENCE_THRESHOLD:
                             raw_status = "Good" if final_prediction == "good" else "Bad"
                             method = f"AI({ml_confidence:.2f})"
@@ -755,6 +755,7 @@ def index():
 
 if __name__ == '__main__':
     print("Starting Smart Posture Assistant...")
+    config_mgr.start_polling()
     print("Access at: http://localhost:5000")
     t1 = threading.Thread(target=detect_posture, daemon=True)
     t1.start()
