@@ -1,383 +1,201 @@
 #!/usr/bin/env python3
-"""
-Posture Data Collection Tool - Web Interface
-Access at http://raspberrypi.local:5001
-Press buttons on web page to label: Good / Bad / Skip
-"""
 import cv2
 import numpy as np
 import csv
 import os
 import time
 import threading
-from flask import Flask, Response, render_template_string
-from utils import extract_features, validate_keypoints, get_feature_names
+from flask import Flask, Response, request, jsonify, render_template_string
 
 try:
     from tflite_runtime.interpreter import Interpreter
-    print("Using tflite_runtime")
 except ImportError:
-    try:
-        from tensorflow.lite.python.interpreter import Interpreter
-        print("Using tensorflow.lite")
-    except ImportError:
-        print("Error: Neither tflite_runtime nor tensorflow found!")
-        print("\nInstall one of these:")
-        print("  pip3 install tflite-runtime")
-        print("  pip3 install tensorflow")
-        exit(1)
+    from tensorflow.lite.python.interpreter import Interpreter
 
-# Configuration
 MODEL_PATH = "/home/theo/4.tflite"
-CAMERA_ID = 1
-DATA_FILE = "../data/posture_data.csv"  # Use parent directory
-MIN_CONFIDENCE = 0.2
+DATA_FILE = "posture_dataset_v2.csv"
+CAMERA_ID = 0
+CONFIDENCE_THRESHOLD = 0.3
+SAVE_DELAY = 0.1 
 
-# Create data directory
-os.makedirs("../data", exist_ok=True)
-
-# Initialize TFLite model
-print("Loading MoveNet model...")
 interpreter = Interpreter(MODEL_PATH, num_threads=2)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
-input_dtype = input_details[0]['dtype']
-in_h = input_details[0]['shape'][1]
-in_w = input_details[0]['shape'][2]
+in_h, in_w = input_details[0]['shape'][1:3]
 
-# Initialize camera
-print("Opening camera...")
-cap = cv2.VideoCapture(CAMERA_ID)
-if not cap.isOpened():
-    print("Cannot open camera")
-    exit(1)
 
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-cap.set(cv2.CAP_PROP_FPS, 30)
+HEADERS = ['label', 'person_id']
+KEYPOINT_NAMES = [
+    'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear', 
+    'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow', 
+    'left_wrist', 'right_wrist', 'left_hip', 'right_hip', 
+    'left_knee', 'right_knee', 'left_ankle', 'right_ankle'
+]
+for kp in KEYPOINT_NAMES:
+    HEADERS.extend([f"{kp}_y", f"{kp}_x", f"{kp}_conf"])
 
-# Check if CSV file exists, if not create with header
-file_exists = os.path.exists(DATA_FILE)
-csv_lock = threading.Lock()
-
-if not file_exists:
+if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, 'w', newline='') as f:
-        writer = csv.writer(f)
-        header = get_feature_names() + ['label']
-        writer.writerow(header)
-    print(f"Created new data file: {DATA_FILE}")
-else:
-    print(f"Appending to existing file: {DATA_FILE}")
+        csv.writer(f).writerow(HEADERS)
+    print(f"Created new dataset file: {DATA_FILE}")
 
-# Statistics
-stats = {
-    'good_count': 0,
-    'bad_count': 0,
-    'last_action': 'Ready to collect data',
-    'total': 0
-}
-
-# Flask app
 app = Flask(__name__)
 outputFrame = None
 current_kpts = None
-frame_lock = threading.Lock()
-label_command = None
+lock = threading.Lock()
+stats = {'good': 0, 'lean': 0, 'hunch': 0, 'tilt': 0, 'total': 0}
 
-def save_sample(label):
-    """Save current keypoints with label"""
-    global current_kpts, stats
-    
-    if current_kpts is None:
-        return False, "No keypoints available"
-    
-    if not validate_keypoints(current_kpts, MIN_CONFIDENCE):
-        return False, "Low confidence keypoints"
-    
-    try:
-        features = extract_features(current_kpts, 640, 480)
-        row = features + [label]
-        
-        with csv_lock:
-            with open(DATA_FILE, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(row)
-        
-        if label == 'good':
-            stats['good_count'] += 1
-        else:
-            stats['bad_count'] += 1
-        
-        stats['total'] = stats['good_count'] + stats['bad_count']
-        stats['last_action'] = f"Saved {label.upper()} sample"
-        
-        return True, f"Saved {label} sample"
-    except Exception as e:
-        return False, str(e)
-
-def process_frames():
-    """Process camera frames in background thread"""
-    global outputFrame, current_kpts, label_command
+def process_camera():
+    global outputFrame, current_kpts
+    cap = cv2.VideoCapture(CAMERA_ID)
+    cap.set(3, 640); cap.set(4, 480); cap.set(5, 30)
     
     while True:
         ret, frame = cap.read()
-        if not ret:
-            continue
+        if not ret: continue
+        
+        img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (in_w, in_h))
+        input_data = np.expand_dims(img, axis=0)
+        if input_details[0]['dtype'] == np.float32:
+            input_data = (input_data.astype(np.float32) - 127.5) / 127.5
+        
+        interpreter.set_tensor(input_details[0]['index'], input_data)
+        interpreter.invoke()
+        kpts = interpreter.get_tensor(output_details[0]['index'])[0][0]
+        
+        with lock: current_kpts = kpts
         
         h, w, _ = frame.shape
+        indices_to_draw = [0, 1, 2, 3, 4, 5, 6]
+        for idx in indices_to_draw:
+            y, x, s = kpts[idx]
+            if s > CONFIDENCE_THRESHOLD:
+                cv2.circle(frame, (int(x*w), int(y*h)), 5, (0, 255, 0), -1)
         
-        # Prepare input for MoveNet
-        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img_resized = cv2.resize(img, (in_w, in_h), interpolation=cv2.INTER_LINEAR)
-        
-        if input_dtype == np.float32:
-            inp = img_resized.astype(np.float32)
-            inp = (inp - 127.5) / 127.5
-            inp = np.expand_dims(inp, axis=0)
-        else:
-            inp = np.expand_dims(img_resized.astype(input_dtype), axis=0)
-        
-        # Run inference
-        interpreter.set_tensor(input_details[0]['index'], inp)
-        interpreter.invoke()
-        output_data = interpreter.get_tensor(output_details[0]['index'])
-        
-        kpts = output_data[0][0] if output_data.ndim == 4 else output_data[0]
-        current_kpts = kpts
-        
-        # Draw keypoints
-        for i, (y, x, score) in enumerate(kpts):
-            if score > MIN_CONFIDENCE:
-                color = (0, 255, 0) if i < 7 else (0, 0, 255)
-                cv2.circle(frame, (int(x * w), int(y * h)), 4, color, -1)
-        
-        # Draw skeleton
-        connections = [
-            (5, 6), (5, 11), (6, 12), (11, 12), (0, 5), (0, 6),
-        ]
-        
-        for (idx1, idx2) in connections:
-            y1, x1, s1 = kpts[idx1]
-            y2, x2, s2 = kpts[idx2]
-            if s1 > MIN_CONFIDENCE and s2 > MIN_CONFIDENCE:
-                pt1 = (int(x1 * w), int(y1 * h))
-                pt2 = (int(x2 * w), int(y2 * h))
-                cv2.line(frame, pt1, pt2, (0, 255, 255), 2)
-        
-        # Display statistics
-        cv2.rectangle(frame, (0, 0), (w, 100), (0, 0, 0), -1)
-        cv2.putText(frame, f"Good: {stats['good_count']}  Bad: {stats['bad_count']}  Total: {stats['total']}", 
-                   (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, stats['last_action'], (10, 60),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-        cv2.putText(frame, "Use web interface to label samples", (10, 85),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        with frame_lock:
-            outputFrame = frame.copy()
+        # Vẽ đường vai
+        if kpts[5][2] > 0.3 and kpts[6][2] > 0.3:
+            ls = (int(kpts[5][1]*w), int(kpts[5][0]*h))
+            rs = (int(kpts[6][1]*w), int(kpts[6][0]*h))
+            cv2.line(frame, ls, rs, (255, 0, 255), 2)
+
+        with lock: outputFrame = frame.copy()
 
 def generate():
-    """Generate MJPEG stream"""
-    global outputFrame, frame_lock
-    
     while True:
-        with frame_lock:
-            if outputFrame is None:
-                continue
-            (flag, encodedImage) = cv2.imencode(".jpg", outputFrame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        
-        if not flag:
-            continue
-        
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' +
-               bytearray(encodedImage) + b'\r\n')
+        with lock:
+            if outputFrame is None: time.sleep(0.01); continue
+            _, buf = cv2.imencode('.jpg', outputFrame)
+        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + bytearray(buf) + b'\r\n')
 
-@app.route("/video_feed")
-def video_feed():
-    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
-
-@app.route("/save/<label>")
-def save_label(label):
-    if label not in ['good', 'bad']:
-        return {'success': False, 'message': 'Invalid label'}
-    
-    success, message = save_sample(label)
-    return {
-        'success': success,
-        'message': message,
-        'stats': stats
-    }
-
-@app.route("/stats")
-def get_stats():
-    return stats
-
+# ================= WEB SERVER =================
 @app.route("/")
 def index():
     return render_template_string("""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Posture Data Collection</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Data collector</title>
         <style>
-            body { 
-                background: #1a1a1a; 
-                color: #fff; 
-                font-family: Arial; 
-                padding: 20px;
-                text-align: center;
+            body { background: #222; color: #fff; font-family: sans-serif; text-align: center; padding: 10px; }
+            img { width: 100%; max-width: 640px; border: 2px solid #555; border-radius: 8px; }
+            .controls { margin-top: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+            button { 
+                padding: 20px; font-size: 18px; border: none;
+                color: white; font-weight: bold; cursor: pointer; user-select: none;
             }
-            .container { max-width: 1000px; margin: 0 auto; }
-            h1 { color: #00ff88; }
-            .video { 
-                width: 100%; 
-                max-width: 640px; 
-                border-radius: 10px; 
-                margin: 20px auto;
-                box-shadow: 0 4px 20px rgba(0,255,136,0.3);
-            }
-            .controls { margin: 30px 0; }
-            button {
-                padding: 20px 40px;
-                font-size: 18px;
-                font-weight: bold;
-                border: none;
-                border-radius: 10px;
-                cursor: pointer;
-                margin: 10px;
-                transition: transform 0.1s;
-            }
-            button:active { transform: scale(0.95); }
-            .btn-good { background: #00ff88; color: #000; }
-            .btn-bad { background: #ff4444; color: #fff; }
-            .btn-good:hover { background: #00dd77; }
-            .btn-bad:hover { background: #dd3333; }
-            .stats {
-                background: #2a2a2a;
-                padding: 20px;
-                border-radius: 10px;
-                margin: 20px auto;
-                max-width: 500px;
-            }
-            .stat-row { 
-                display: flex; 
-                justify-content: space-between; 
-                margin: 10px 0;
-                font-size: 18px;
-            }
-            .message {
-                padding: 15px;
-                border-radius: 5px;
-                margin: 20px auto;
-                max-width: 500px;
-                display: none;
-            }
-            .success { background: #00ff8833; border: 1px solid #00ff88; }
-            .error { background: #ff444433; border: 1px solid #ff4444; }
-            .instructions {
-                background: #2a2a2a;
-                padding: 20px;
-                border-radius: 10px;
-                margin: 20px auto;
-                max-width: 600px;
-                text-align: left;
-            }
+            button:active { opacity: 0.7; transform: scale(0.98); }
+            .btn-good { background: #28a745; }
+            .btn-lean { background: #dc3545; }
+            .btn-hunch { background: #ffc107; color: #000; }
+            .btn-tilt { background: #17a2b8; }
+            
+            input { padding: 10px; font-size: 16px; width: 80px; text-align: center; margin-left: 10px; }
+            #stats { margin-top: 20px; font-size: 16px; color: #ccc; }
         </style>
     </head>
     <body>
-        <div class="container">
-            <h1>Posture Data Collection</h1>
-            
-            <div class="instructions">
-                <h3>Instructions:</h3>
-                <ul>
-                    <li>Click <strong>GOOD</strong> when sitting with proper posture</li>
-                    <li>Click <strong>BAD</strong> when slouching or poor posture</li>
-                    <li>Collect at least <strong>50 samples per label</strong></li>
-                    <li>Try different angles and distances</li>
-                    <li>When done, run: <code>python train_model.py</code></li>
-                </ul>
-            </div>
-            
-            <img src="/video_feed" class="video">
-            
-            <div class="controls">
-                <button class="btn-good" onclick="saveLabel('good')">
-                    GOOD POSTURE
-                </button>
-                <button class="btn-bad" onclick="saveLabel('bad')">
-                    BAD POSTURE
-                </button>
-            </div>
-            
-            <div id="message" class="message"></div>
-            
-            <div class="stats">
-                <h3>Statistics</h3>
-                <div class="stat-row">
-                    <span>Good samples:</span>
-                    <strong id="good-count">0</strong>
-                </div>
-                <div class="stat-row">
-                    <span>Bad samples:</span>
-                    <strong id="bad-count">0</strong>
-                </div>
-                <div class="stat-row">
-                    <span>Total:</span>
-                    <strong id="total-count">0</strong>
-                </div>
-            </div>
+        <h3>DATA COLLECTOR</h3>
+        <img src="/video_feed">
+        <div style="margin-top:10px">
+            <label>Person ID:</label> <input type="number" id="pid" value="1">
         </div>
         
+        <div class="controls">
+            <button class="btn-good" ontouchstart="start('good')" ontouchend="stop()" onmousedown="start('good')" onmouseup="stop()">
+                GOOD
+            </button>
+            <button class="btn-lean" ontouchstart="start('lean')" ontouchend="stop()" onmousedown="start('lean')" onmouseup="stop()">
+                LEAN
+            </button>
+            <button class="btn-hunch" ontouchstart="start('hunch')" ontouchend="stop()" onmousedown="start('hunch')" onmouseup="stop()">
+                HUNCH
+            </button>
+            <button class="btn-tilt" ontouchstart="start('tilt')" ontouchend="stop()" onmousedown="start('tilt')" onmouseup="stop()">
+                TILT
+            </button>
+        </div>
+        
+        <div id="stats">
+            Total: 0 | Good: 0 | Lean: 0 | Hunch: 0 | Tilt: 0
+        </div>
+
         <script>
-            function saveLabel(label) {
-                fetch('/save/' + label)
-                    .then(r => r.json())
-                    .then(data => {
-                        const msg = document.getElementById('message');
-                        msg.textContent = data.message;
-                        msg.className = 'message ' + (data.success ? 'success' : 'error');
-                        msg.style.display = 'block';
-                        
-                        if (data.success) {
-                            updateStats(data.stats);
-                            setTimeout(() => {
-                                msg.style.display = 'none';
-                            }, 2000);
-                        }
-                    });
+            let interval;
+            
+            function start(label) {
+                if (interval) clearInterval(interval);
+                let pid = document.getElementById('pid').value;
+                save(label, pid); // Lưu ngay 1 cái
+                interval = setInterval(() => save(label, pid), 150); // Lưu liên tục mỗi 150ms
             }
             
-            function updateStats(stats) {
-                document.getElementById('good-count').textContent = stats.good_count;
-                document.getElementById('bad-count').textContent = stats.bad_count;
-                document.getElementById('total-count').textContent = stats.total;
+            function stop() {
+                if (interval) clearInterval(interval);
             }
             
-            setInterval(() => {
-                fetch('/stats')
-                    .then(r => r.json())
-                    .then(updateStats);
-            }, 2000);
+            function save(label, pid) {
+                fetch(`/save?label=${label}&pid=${pid}`)
+                .then(r => r.json())
+                .then(d => {
+                    document.getElementById('stats').innerHTML = 
+                        `Total: ${d.total} | Good: ${d.good} | Lean: ${d.lean} | Hunch: ${d.hunch} | Tilt: ${d.tilt}`;
+                });
+            }
         </script>
     </body>
     </html>
     """)
 
+@app.route("/video_feed")
+def video_feed(): return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route("/save")
+def save_data():
+    label = request.args.get('label')
+    pid = request.args.get('pid')
+    
+    with lock: kpts = current_kpts
+    
+    if kpts is not None:
+        if kpts[0][2] > CONFIDENCE_THRESHOLD and kpts[5][2] > CONFIDENCE_THRESHOLD and kpts[6][2] > CONFIDENCE_THRESHOLD:
+            row = [label, pid]
+            for kp in kpts: row.extend([kp[0], kp[1], kp[2]])
+            
+            with open(DATA_FILE, 'a', newline='') as f:
+                csv.writer(f).writerow(row)
+            
+            stats[label] += 1
+            stats['total'] += 1
+    
+    return jsonify(stats)
+
+@app.route("/stats")
+def get_stats():
+    return jsonify(stats)
+
 if __name__ == '__main__':
-    print("\n" + "="*60)
-    print("POSTURE DATA COLLECTION - WEB INTERFACE")
-    print("="*60)
-    print(f"\nAccess at: http://raspberrypi.local:5001")
-    print(f"Or: http://192.168.x.x:5001")
-    print(f"Data will be saved to: {DATA_FILE}")
-    print("\n" + "="*60 + "\n")
-    
-    # Start frame processing thread
-    t = threading.Thread(target=process_frames, daemon=True)
+    t = threading.Thread(target=process_camera, daemon=True)
     t.start()
-    
-    # Start Flask app
-    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
