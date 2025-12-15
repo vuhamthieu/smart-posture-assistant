@@ -1,3 +1,6 @@
+
+
+
 #!/usr/bin/env python3
 import numpy as np
 import math
@@ -30,15 +33,25 @@ def calculate_head_tilt_fixed(left_eye, right_eye):
 def validate_keypoints(kpts, min_confidence=0.25):
     count = sum(1 for k in kpts[:7] if k[2] > min_confidence)
     return count >= 5
-
 def extract_features_31(kpts, w, h):
     features = []
+    
+    nose_y_origin = kpts[0][0] * h
+    nose_x_origin = kpts[0][1] * w
     
     confs = []
     for idx in range(7):
         y, x, s = kpts[idx]
-        features.extend([x * w, y * h, s])
+        
+        x_px = x * w
+        y_px = y * h
+        
+        x_rel = x_px - nose_x_origin
+        y_rel = y_px - nose_y_origin
+        
+        features.extend([x_rel, y_rel, s])
         confs.append(s)
+        
     nose = np.array([kpts[0][1]*w, kpts[0][0]*h])
     le = np.array([kpts[1][1]*w, kpts[1][0]*h])
     re = np.array([kpts[2][1]*w, kpts[2][0]*h])
@@ -51,6 +64,7 @@ def extract_features_31(kpts, w, h):
         mid_mouth = nose + np.array([0.0, np.linalg.norm(le - re) * 0.6])
     else:
         mid_mouth = nose + np.array([0.0, np.linalg.norm(ls - rs) * 0.4])
+    
     neck_angle = calculate_neck_angle(ls, rs, mid_mouth)
     features.append(neck_angle)
     
@@ -66,7 +80,6 @@ def extract_features_31(kpts, w, h):
     features.append(face_ratio)
     
     features.append(abs(neck_angle))
-    
     features.append(abs(ls[1] - rs[1]))
     
     ear_y_avg = (lear[1] + rear[1]) / 2
@@ -74,9 +87,7 @@ def extract_features_31(kpts, w, h):
     features.append(nose_ear_diff)
     
     features.append(np.mean(confs))
-    
     features.append(neck_angle * face_ratio)
-    
     features.append(calculate_head_tilt_fixed(le, re))
     
     return features

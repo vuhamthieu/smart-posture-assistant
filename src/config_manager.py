@@ -6,6 +6,7 @@ from supabase import create_client
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+TARGET_USER_ID = "f046fb85-4157-493e-bd29-2055cf527739"
 DEVICE_ID = "pi-posture-001"
 UPDATE_SCRIPT_PATH = "/home/theo/smart-posture-assistant/update.sh"
 
@@ -20,24 +21,21 @@ class ConfigManager:
             "status_buffer_size": 8,
             "bad_duration_to_alert": 1.0,
             
-            "led_color_good": [255, 200, 0],   
-            "led_color_bad": [0, 255, 0],    
+            "led_color_good": [255, 200, 0],    
+            "led_color_bad": [0, 255, 0],     
             "oled_icon_style": "A",
             "alert_language": "vi",
-
             "alert_messages_vi": [
                 "Bạn đang cúi đầu quá thấp, hãy ngồi thẳng lại",
                 "Tư thế ngồi của bạn không đúng, giữ thẳng lưng nhé",
                 "Hãy giữ đầu thẳng với cột sống",
                 "Bạn đang ngồi quá gần màn hình, hãy lùi ra xa một chút",
-                "Ngồi thẳng dậy đi nào"
             ],
             "alert_messages_en": [
                 "Your head is too low, please sit up straight",
                 "Bad posture detected, keep your back straight",
                 "Please align your head with your spine",
                 "You are sitting too close to the screen",
-                "Sit up straight!"
             ]
         }
         self.lock = threading.Lock()
@@ -45,10 +43,34 @@ class ConfigManager:
         if SUPABASE_URL and SUPABASE_KEY:
             try:
                 self.client = create_client(SUPABASE_URL, SUPABASE_KEY)
-                print("✓ [Config] Connected to Supabase Broker")
+                print("Config Connected to Supabase")
                 self._fetch_config_once()
             except Exception as e:
-                print(f"⚠ [Config] Connection failed: {e}")
+                print(f"Config Connection failed: {e}")
+
+    def upload_record(self, posture_type, confidence):
+        if not self.client:
+            return
+
+        type_mapping = {
+            "Good": "good",
+            "Lean": "leaning",
+            "Hunch": "slouching",
+            "Tilt": "slouching"
+        }
+        
+        db_posture_type = type_mapping.get(posture_type, "slouching")
+        if posture_type == "Good": db_posture_type = "good"
+
+        try:
+            data = {
+                "user_id": TARGET_USER_ID,
+                "posture_type": db_posture_type,
+                "confidence": float(confidence)
+            }
+            self.client.table("posture_records").insert(data).execute()
+        except Exception as e:
+            print(f"Error uploading: {e}")
 
     def get(self, key, default=None):
         with self.lock:
@@ -64,26 +86,25 @@ class ConfigManager:
             if res.data:
                 with self.lock:
                     self.config.update(res.data[0]['settings'])
-                print("✓ [Config] Initial settings loaded")
         except Exception:
             pass
 
 def _loop(mgr):
     while True:
         if mgr.client:
-            # 1. Commands
             try:
                 res = mgr.client.table("device_commands").select("*").eq("device_id", DEVICE_ID).eq("status", "PENDING").execute()
                 for cmd in res.data:
                     cid = cmd['id']
                     action = cmd['command']
                     mgr.client.table("device_commands").update({"status": "EXECUTING"}).eq("id", cid).execute()
+                    
                     if action == 'UPDATE': subprocess.Popen(["/bin/bash", UPDATE_SCRIPT_PATH])
                     elif action == 'RESTART': subprocess.run(["systemctl", "restart", "posture-bot"])
+                    
                     mgr.client.table("device_commands").update({"status": "COMPLETED"}).eq("id", cid).execute()
             except Exception: pass
 
-            # 2. Config
             try:
                 res = mgr.client.table("device_configs").select("settings").eq("device_id", DEVICE_ID).execute()
                 if res.data:

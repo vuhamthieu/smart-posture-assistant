@@ -1,0 +1,40 @@
+{
+    "check_status": [
+        "kiểm tra tư thế",
+        "xem dáng ngồi",
+        "tôi ngồi có chuẩn không",
+        "check posture",
+        "kiểm tra dáng",
+        "tư thế thế nào"
+    ],
+    "start_timer": [
+        "bắt đầu tính giờ",
+        "bắt đầu học",
+        "start timer",
+        "tính giờ đi",
+        "bật đồng hồ",
+        "tập trung làm việc"
+    ],
+    "stop_timer": [
+        "dừng lại",
+        "nghỉ giải lao",
+        "stop timer",
+        "tắt đồng hồ",
+        "không học nữa",
+        "dừng tính giờ"
+    ],
+    "check_time": [
+        "mấy giờ rồi",
+        "còn bao nhiêu thời gian",
+        "xem giờ",
+        "thời gian còn lại",
+        "học được bao lâu rồi"
+    ],
+    "greeting": [
+        "xin chào",
+        "hello",
+        "hi bot",
+        "chào bạn",
+        "alo"
+    ]
+}
