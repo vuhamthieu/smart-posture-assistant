@@ -255,7 +255,7 @@ def get_alert_message(key):
     idx_map = {'lean': 0, 'hunch': 1, 'tilt': 2, 'close': 3}
     if messages and key in idx_map and len(messages) > idx_map[key]:
         return messages[idx_map[key]], lang
-    fallback = {'lean': "Ngồi thẳng lại", 'hunch': "Đừng gù lưng", 'tilt': "Đừng nghiêng đầu", 'close': "Ngồi xa ra"}
+    fallback = {'lean': "Bạn đang cúi đầu quá thấp", 'hunch': "Đừng gù lưng", 'tilt': "Đừng nghiêng đầu", 'close': "Ngồi xa ra"}
     return fallback.get(key, "Cảnh báo"), 'vi'
 
 def speak_alert(key):
