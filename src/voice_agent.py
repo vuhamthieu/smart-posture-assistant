@@ -69,12 +69,12 @@ def get_target_mic_index():
     return None 
 
 RESPONSES = {
-    'check_status': ["De toi xem nao...", "Dang kiem tra tu the."],
-    'start_timer': ["Ok, bat dau tinh gio 25 phut.", "Da kich hoat che do tap trung."],
-    'stop_timer': ["Da dung dong ho.", "Ok, dung tinh gio."],
-    'check_time': ["Thoi gian con lai la...", "Ban muon xem gio a?"],
-    'greeting': ["Xin chao! Can toi giup gi khong?", "Chao ban!"],
-    'unknown': ["Xin loi, toi chua hieu.", "Ban noi lai duoc khong?"]
+    'check_status': ["để tôi xem nào...", "Đang kiểm tra tư thế."],
+    'start_timer': ["Ok, bắt đầu đếm giờ .", "Đã kích hoạt chế độ tập  trung."],
+    'stop_timer': ["Đã dừng đồng hồ.", "Ok, dừng tính giờ."],
+    'check_time': ["Thời gian còn lại là...", "Đang kiể tra thời gian còn lại"],
+    'greeting': ["Xin chào! cần tôi giúp gì không?", "Chao bạn!", "Hello bạn"],
+    'unknown': ["Xin lỗi, tôi chưa hiểu.", "bạn nói lại được không?"]
 }
 
 def speak_text(text, lang='vi'):
@@ -106,9 +106,9 @@ def execute_command(intent, current_stats, timer_obj):
     
     if intent == 'check_status':
         status = current_stats.get('posture_status', 'Init')
-        if status == 'Good': speak_text("Tu the chuan, 10 diem!")
-        elif status == 'Bad': speak_text("Ngoi thang lung len ban oi!")
-        else: speak_text("He thong dang khoi dong.")
+        if status == 'Good': speak_text("Tư thế chuẩn, 10 điểm!")
+        elif status == 'Bad': speak_text("Ngồi thẳng lưng lê bạn ơi!")
+        else: speak_text("Hệ thống đang khởi động.")
         
     elif intent == 'start_timer':
         if timer_obj: timer_obj.start(25)
@@ -119,9 +119,9 @@ def execute_command(intent, current_stats, timer_obj):
     elif intent == 'check_time':
         if timer_obj and timer_obj.is_running:
             rem = timer_obj.remaining
-            speak_text(f"Con {int(rem//60)} phut {int(rem%60)} giay.")
+            speak_text(f"Còn {int(rem//60)} phút {int(rem%60)} giây.")
         else:
-            speak_text("Dong ho dang tat.")
+            speak_text("Đồng hô đang tắt.")
 
 def voice_listener_loop(led_ctrl, face_ctrl, stats_ref, timer_ref):
     global IS_BOT_SPEAKING
@@ -166,7 +166,7 @@ def voice_listener_loop(led_ctrl, face_ctrl, stats_ref, timer_ref):
                 except sr.UnknownValueError: 
                     pass
                 except sr.RequestError: 
-                    speak_text("Loi mang.")
+                    speak_text("Lỗi kết nối.")
                 
                 led_ctrl.set_color_array([0, 255, 0])
             except Exception:
