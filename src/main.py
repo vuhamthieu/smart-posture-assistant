@@ -40,11 +40,27 @@ CALIBRATION_FRAMES = 60
 LOG_FILE = "posture_log.csv"
 CAMERA_ID = 0
 
+
+print("Initializing Camera...")
 cap = cv2.VideoCapture(CAMERA_ID)
+
+cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+cap.set(cv2.CAP_PROP_EXPOSURE, 120)
+
+cap.set(cv2.CAP_PROP_FPS, 10)
+
 if not cap.isOpened():
     print("Error: Camera not found!")
 else:
-    cap.set(3, 640); cap.set(4, 480); cap.set(5, 30)
+    real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    print(f"Camera started at: {int(real_w)}x{int(real_h)}")
 
 try: from tflite_runtime.interpreter import Interpreter
 except: from tensorflow.lite.python.interpreter import Interpreter

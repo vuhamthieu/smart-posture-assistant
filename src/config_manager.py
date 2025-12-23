@@ -27,8 +27,8 @@ class ConfigManager:
             "alert_language": "vi",
             "alert_messages_vi": [
                 "Bạn đang cúi đầu quá thấp, hãy ngồi thẳng lại",
-                "Tư thế ngồi của bạn không đúng, giữ thẳng lưng nhé",
-                "Hãy giữ đầu thẳng với cột sống",
+                "Bạn đang gù lưng Hãy giữ thẳng lưng nhé",
+                "Đừng nghiên đầu, hãy giữ đầu thẳng với cột sống",
                 "Bạn đang ngồi quá gần màn hình, hãy lùi ra xa một chút",
             ],
             "alert_messages_en": [
