@@ -51,15 +51,21 @@ class ConfigManager:
     def upload_record(self, posture_type, confidence):
         if not self.client:
             return
-
+        raw_type = str(posture_type).strip().title()
         type_mapping = {
             "Good": "good",
             "Lean": "leaning",
+            "Forward Head": "leaning",
+            "Forward head": "leaning",
+            "forward head": "leaning",
             "Hunch": "slouching",
-            "Tilt": "slouching"
+            "Tilt": "tilt"
         }
-        
-        db_posture_type = type_mapping.get(posture_type, "slouching")
+
+        db_posture_type = type_mapping.get(raw_type, "unknown")
+
+        print(f"Uploading: {raw_type} -> {db_posture_type} ({confidence})")
+
         if posture_type == "Good": db_posture_type = "good"
 
         try:

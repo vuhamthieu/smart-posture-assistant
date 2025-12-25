@@ -127,48 +127,6 @@ def cleanup():
 
 atexit.register(cleanup)
 
-def log_data(phys_lbl, ai_lbl, ai_conf, final_res, neck_val, nose_val):
-    global last_upload_time, last_upload_status
-    
-    try:
-        if not os.path.exists(LOG_FILE):
-            with open(LOG_FILE, 'w', newline='') as f:
-                csv.writer(f).writerow(['Timestamp', 'Phys_Label', 'AI_Label', 'AI_Conf', 'Final_Result', 'Neck_Change', 'Nose_Drop'])
-        with open(LOG_FILE, 'a', newline='') as f:
-            csv.writer(f).writerow([
-                datetime.now().strftime("%H:%M:%S.%f")[:-3],
-                phys_lbl, ai_lbl, f"{ai_conf:.2f}", final_res,
-                f"{neck_val:.2f}", f"{nose_val:.2f}"
-            ])
-    except: pass
-    
-    upload_type = "Good"
-    ai_clean = str(ai_lbl).lower().strip()
-    phys_clean = str(phys_lbl).lower()
-
-    if final_res == "Bad":
-        if 'tilt' in ai_clean:
-            upload_type = "Tilt"
-        elif "lean" in phys_clean or "lean" in ai_clean:
-            upload_type = "Lean"
-        elif "hunch" in phys_clean or "hunch" in ai_clean:
-            upload_type = "Hunch"
-        else:
-            upload_type = "Hunch"
-    
-    current_time = time.time()
-    
-    is_status_changed = (upload_type != last_upload_status)
-    
-    is_heartbeat_time = (current_time - last_upload_time > HEARTBEAT_INTERVAL)
-
-    if is_status_changed or is_heartbeat_time:
-        threading.Thread(target=config_mgr.upload_record, 
-                         args=(upload_type, ai_conf), 
-                         daemon=True).start()
-        
-        last_upload_time = current_time
-        last_upload_status = upload_type
 
 def init_audio():
     try: subprocess.run(['amixer', 'set', 'Master', '100%'], check=False); return True
