@@ -22,6 +22,12 @@ from config_manager import config_mgr
 import voice_agent
 from ctypes import *
 from contextlib import contextmanager
+import glob
+
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+RESET = "\033[0m"
 
 ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
 def py_error_handler(filename, line, function, err, fmt): pass
@@ -38,30 +44,74 @@ def no_alsa_error():
 
 CALIBRATION_FRAMES = 60
 LOG_FILE = "posture_log.csv"
-CAMERA_ID = 0
-
+last_upload_time = 0
+last_upload_status = ""
+HEARTBEAT_INTERVAL = 15.0
 
 print("Initializing Camera...")
-cap = cv2.VideoCapture(CAMERA_ID)
+def auto_find_camera():
+    dev_list = glob.glob('/dev/video*')
+    dev_list.sort()
+    
+    for dev_path in dev_list:
+        try:
+            dev_id = int(dev_path.replace('/dev/video', ''))
+        except: continue
+
+        print(f"{YELLOW}Checking {dev_path}...{RESET}", end=" ")
+        temp_cap = cv2.VideoCapture(dev_id)
+        if temp_cap.isOpened():
+            ret, _ = temp_cap.read()
+            temp_cap.release()
+            if ret:
+                print(f"{GREEN}OK{RESET}")
+                return dev_id
+        print(f"{RED}Fail{RESET}")
+    return None
+
+def reset_camera_driver():
+    print(f"{RED}Camera not found. Resetting driver...{RESET}")
+    try:
+        os.system("sudo modprobe -r uvcvideo")
+        time.sleep(1)
+        os.system("sudo modprobe uvcvideo")
+        time.sleep(2)
+    except: pass
+
+print(f"{YELLOW}Initializing...{RESET}")
+found_id = auto_find_camera()
+
+if found_id is None:
+    reset_camera_driver()
+    found_id = auto_find_camera()
+
+if found_id is None:
+    print(f"{RED}CRITICAL ERROR: No camera hardware detected.{RESET}")
+    exit(1)
+
+print(f"{GREEN}Selected Camera ID: {found_id}{RESET}")
+cap = cv2.VideoCapture(found_id)
 
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-
-
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1024)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 768)
-
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
 cap.set(cv2.CAP_PROP_EXPOSURE, 120)
-
 cap.set(cv2.CAP_PROP_FPS, 10)
 
-if not cap.isOpened():
-    print("Error: Camera not found!")
-else:
-    real_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    real_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    print(f"Camera started at: {int(real_w)}x{int(real_h)}")
+def cleanup_camera():
+    if 'cap' in globals() and cap.isOpened():
+        print(f"\n{YELLOW}Releasing camera resource...{RESET}")
+        cap.release()
 
+atexit.register(cleanup_camera)
+
+if not cap.isOpened():
+    print(f"{RED}Error: Failed to open camera stream{RESET}")
+else:
+    w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    print(f"{GREEN}Camera Started: {int(w)}x{int(h)}{RESET}")
 try: from tflite_runtime.interpreter import Interpreter
 except: from tensorflow.lite.python.interpreter import Interpreter
 
@@ -282,7 +332,14 @@ class FaceDisplay:
                 d.arc((45, 45, 83, 60), 180, 360, fill=255, width=2)
             ))
 
-    def draw_timer(self, txt): self._draw(lambda d: d.text((10, 25), txt, fill=255))
+    def draw_timer(self, txt): 
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 25)
+            self._draw(lambda d: d.text((25, 18), txt, font=font, fill=255))
+            
+        except IOError:
+            print("Use default font")
+            self._draw(lambda d: d.text((45, 25), txt, fill=255))
 
 face_display = FaceDisplay(oled, oled_lock)
 if oled: 
@@ -366,15 +423,12 @@ def detect_posture():
                 neck_h = (kpts[5][0] + kpts[6][0]) / 2 - kpts[0][0]
                 ear_y = (kpts[3][0] + kpts[4][0]) / 2; nose_y = kpts[0][0]
                 nose_ear_val = nose_y - ear_y
-                
                 if face_w > 0:
                     calib_neck.append(neck_h / face_w)
                     calib_nose.append(nose_ear_val / face_w)
-                
                 msg = f"CALIB... {int(len(calib_neck)/CALIBRATION_FRAMES*100)}%"
                 cv2.putText(frame, "SIT STRAIGHT", (20, h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
                 cv2.putText(frame, msg, (20, h//2+40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
-                
                 if len(calib_neck) >= CALIBRATION_FRAMES:
                     base_neck_ratio = np.mean(calib_neck)
                     base_nose_ear_diff = np.mean(calib_nose)
@@ -436,8 +490,11 @@ def detect_posture():
         
         if final_status == "Bad":
             bad_color = config_mgr.get('led_color_bad', [255, 0, 0])
-            if not study_timer.is_running: led_controller.set_color_array(bad_color)
-            face_display.draw_angry()
+            
+            if not study_timer.is_running: 
+                led_controller.set_color_array(bad_color)
+                face_display.draw_angry() 
+            
             if time.time()-last_bad>1.5:
                 if time.time()-last_alert>8:
                     speak_alert(detected_type if detected_type else 'lean')
@@ -446,8 +503,12 @@ def detect_posture():
                 if last_bad==0: last_bad=time.time()
         else:
             good_color = config_mgr.get('led_color_good', [0, 255, 0])
-            if not study_timer.is_running: led_controller.set_color_array(good_color)
-            face_display.draw_normal(); last_bad=0
+            
+            if not study_timer.is_running:
+                led_controller.set_color_array(good_color)
+                face_display.draw_normal(); 
+            
+            last_bad=0
             
         if frame_cnt%2==0:
             cv2.putText(frame, f"Stat:{final_status}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255) if final_status=="Bad" else (0,255,0), 2)
