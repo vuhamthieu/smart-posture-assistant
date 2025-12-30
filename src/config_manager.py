@@ -6,13 +6,16 @@ from supabase import create_client
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-TARGET_USER_ID = "f046fb85-4157-493e-bd29-2055cf527739"
-DEVICE_ID = "pi-posture-001"
+
+DEVICE_ID = "pi-posture-001" 
+
 UPDATE_SCRIPT_PATH = "/home/theo/smart-posture-assistant/update.sh"
 
 class ConfigManager:
     def __init__(self):
         self.client = None
+        self.current_user_id = None
+        
         self.config = {
             "neck_threshold": 35.0,
             "ml_confidence_threshold": 0.75,
@@ -21,21 +24,23 @@ class ConfigManager:
             "status_buffer_size": 8,
             "bad_duration_to_alert": 1.0,
             
-            "led_color_good": [255, 200, 0],    
-            "led_color_bad": [0, 255, 0],     
+            "led_color_good": [0, 255, 0],   
+            "led_color_bad": [255, 0, 0],      
             "oled_icon_style": "A",
             "alert_language": "vi",
             "alert_messages_vi": [
-                "Bạn đang cúi đầu quá thấp, hãy ngồi thẳng lại",
-                "Bạn đang gù lưng Hãy giữ thẳng lưng nhé",
-                "Đừng nghiên đầu, hãy giữ đầu thẳng với cột sống",
-                "Bạn đang ngồi quá gần màn hình, hãy lùi ra xa một chút",
+                "Bạn đang cúi đầu quá thấp",
+                "Đừng gù lưng",
+                "Đừng nghiêng đầu",
+                "Ngồi xa màn hình ra",
+                "Tư thế xấu"
             ],
             "alert_messages_en": [
-                "Your head is too low, please sit up straight",
-                "Bad posture detected, keep your back straight",
-                "Please align your head with your spine",
-                "You are sitting too close to the screen",
+                "Head too low",
+                "Don't slouch",
+                "Don't tilt head",
+                "Sit away",
+                "Bad posture"
             ]
         }
         self.lock = threading.Lock()
@@ -43,36 +48,31 @@ class ConfigManager:
         if SUPABASE_URL and SUPABASE_KEY:
             try:
                 self.client = create_client(SUPABASE_URL, SUPABASE_KEY)
-                print("Config Connected to Supabase")
-                self._fetch_config_once()
+                print(f"Config Connected to Supabase (Device: {DEVICE_ID})")
+                self._fetch_config_and_owner()
             except Exception as e:
                 print(f"Config Connection failed: {e}")
 
-    def upload_record(self, posture_type, confidence):
-        if not self.client:
+    def upload_record(self, posture_type, confidence, metrics=None):
+        if not self.client or not self.current_user_id:
             return
-        raw_type = str(posture_type).strip().title()
+
         type_mapping = {
             "Good": "good",
             "Lean": "leaning",
-            "Forward Head": "leaning",
-            "Forward head": "leaning",
-            "forward head": "leaning",
             "Hunch": "slouching",
-            "Tilt": "tilt"
+            "Tilt": "tilt" 
         }
-
-        db_posture_type = type_mapping.get(raw_type, "unknown")
-
-        print(f"Uploading: {raw_type} -> {db_posture_type} ({confidence})")
-
+        
+        db_posture_type = type_mapping.get(posture_type, posture_type.lower())
         if posture_type == "Good": db_posture_type = "good"
 
         try:
             data = {
-                "user_id": TARGET_USER_ID,
+                "user_id": self.current_user_id, 
                 "posture_type": db_posture_type,
-                "confidence": float(confidence)
+                "confidence": float(confidence),
+                "metrics": metrics if metrics else {}
             }
             self.client.table("posture_records").insert(data).execute()
         except Exception as e:
@@ -86,37 +86,59 @@ class ConfigManager:
         t = threading.Thread(target=_loop, args=(self,), daemon=True)
         t.start()
 
-    def _fetch_config_once(self):
+    def _fetch_config_and_owner(self):
         try:
-            res = self.client.table("device_configs").select("settings").eq("device_id", DEVICE_ID).execute()
+            res = self.client.table("device_configs").select("settings, user_id").eq("device_id", DEVICE_ID).execute()
+            
             if res.data:
-                with self.lock:
-                    self.config.update(res.data[0]['settings'])
-        except Exception:
-            pass
+                data = res.data[0]
+
+                new_owner = data.get('user_id')
+                if new_owner != self.current_user_id:
+                    print(f">>> DEVICE PAIRED WITH NEW USER: {new_owner}")
+                    self.current_user_id = new_owner
+                
+                if data.get('settings'):
+                    clean_settings = {k: v for k, v in data['settings'].items() if v is not None}
+                    with self.lock:
+                        self.config.update(clean_settings)
+                        
+        except Exception as e:
+            print(f"Fetch config error: {e}")
 
 def _loop(mgr):
     while True:
         if mgr.client:
             try:
                 res = mgr.client.table("device_commands").select("*").eq("device_id", DEVICE_ID).eq("status", "PENDING").execute()
+                
                 for cmd in res.data:
                     cid = cmd['id']
                     action = cmd['command']
+                    
+                    print(f">>> Received Command: {action}")
+
                     mgr.client.table("device_commands").update({"status": "EXECUTING"}).eq("id", cid).execute()
                     
-                    if action == 'UPDATE': subprocess.Popen(["/bin/bash", UPDATE_SCRIPT_PATH])
-                    elif action == 'RESTART': subprocess.run(["systemctl", "restart", "posture-bot"])
+                    if action == 'UPDATE_CODE' or action == 'UPDATE': 
+                        if os.path.exists(UPDATE_SCRIPT_PATH):
+                            subprocess.Popen(["/bin/bash", UPDATE_SCRIPT_PATH])
+                        else:
+                            print("Update script not found!")
+                            
+                    elif action == 'RESTART':
+                        subprocess.run(["sudo", "systemctl", "restart", "posture-bot"])
                     
-                    mgr.client.table("device_commands").update({"status": "COMPLETED"}).eq("id", cid).execute()
-            except Exception: pass
+                    elif action == 'UPDATE_CONFIG':
+                        mgr._fetch_config_and_owner()
 
-            try:
-                res = mgr.client.table("device_configs").select("settings").eq("device_id", DEVICE_ID).execute()
-                if res.data:
-                    with mgr.lock:
-                        mgr.config.update(res.data[0]['settings'])
-            except Exception: pass
+                    mgr.client.table("device_commands").update({"status": "COMPLETED"}).eq("id", cid).execute()
+            
+            except Exception as e:
+                print(f"Command loop error: {e}")
+
+            mgr._fetch_config_and_owner()
+            
         time.sleep(5)
 
 config_mgr = ConfigManager()

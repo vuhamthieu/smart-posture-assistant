@@ -138,10 +138,6 @@ output_details = interpreter.get_output_details()
 in_h, in_w = input_details[0]['shape'][1:3]
 input_dtype = input_details[0]['dtype']
 
-last_upload_time = 0
-last_upload_status = ""
-HEARTBEAT_INTERVAL = 15.0
-
 LED_COUNT = 12; LED_PIN = 12; LED_FREQ_HZ = 800000; LED_DMA = 10; LED_INVERT = False; LED_CHANNEL = 0
 oled = None; oled_lock = threading.Lock()
 
@@ -177,7 +173,7 @@ def cleanup():
 
 atexit.register(cleanup)
 
-def log_data(phys_lbl, ai_lbl, ai_conf, final_res, neck_val, nose_val):
+def log_data(phys_lbl, ai_lbl, ai_conf, final_res, neck_val, nose_val, angle):
     global last_upload_time, last_upload_status
     
     try:
@@ -213,8 +209,13 @@ def log_data(phys_lbl, ai_lbl, ai_conf, final_res, neck_val, nose_val):
     is_heartbeat_time = (current_time - last_upload_time > HEARTBEAT_INTERVAL)
 
     if is_status_changed or is_heartbeat_time:
+        metrics_data = {
+            "neck_angle": float(angle),
+            "neck_ratio": float(neck_val),
+            "nose_dist": float(nose_val)
+        }
         threading.Thread(target=config_mgr.upload_record, 
-                         args=(upload_type, ai_conf), 
+                         args=(upload_type, ai_conf,metrics_data), 
                          daemon=True).start()
         
         last_upload_time = current_time
@@ -480,7 +481,7 @@ def detect_posture():
                     if is_bad_posture: raw_status = "Bad"; method = phys_label
                 
                 debug_msg = f"N:{neck_change:.2f} D:{nose_drop_amount:.2f}"
-                log_data(phys_label, ai_label, ai_conf, raw_status, neck_change, nose_drop_amount)
+                log_data(phys_label, ai_label, ai_conf, raw_status, neck_change, nose_drop_amount, angle)
 
             except: method="Err"
         else: method="NoPerson"
