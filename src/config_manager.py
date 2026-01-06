@@ -3,11 +3,16 @@ import time
 import threading
 import subprocess
 from supabase import create_client
+from dotenv import load_dotenv
+from pathlib import Path 
+
+env_path = Path('/home/theo/smart-posture-assistant/.env')
+load_dotenv(dotenv_path=env_path)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-DEVICE_ID = "pi-posture-001" 
+DEVICE_ID = os.environ.get("DEVICE_ID", "pi-posture-001")
 
 UPDATE_SCRIPT_PATH = "/home/theo/smart-posture-assistant/update.sh"
 
