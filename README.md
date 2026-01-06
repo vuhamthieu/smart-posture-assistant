@@ -1,2 +1,2 @@
 # smart-posture-assistant
-test OTAOTA
+test OTA
