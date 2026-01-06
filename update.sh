@@ -10,8 +10,8 @@ MAIN_SCRIPT="$REPO_DIR/src/main.py"
 LOG_FILE="$REPO_DIR/update.log"
 PID_FILE="$REPO_DIR/bot.pid"
 
-SUPABASE_URL="${SUPABASE_URL:-your_supabase_url}"
-SUPABASE_KEY="${SUPABASE_KEY:-your_supabase_key}"
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 DEVICE_ID="pi-posture-001"
 
 log() {
