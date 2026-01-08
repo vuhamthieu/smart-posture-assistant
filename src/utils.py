@@ -21,7 +21,7 @@ def calculate_neck_angle(left_shoulder, right_shoulder, mouth):
     angle = np.degrees(np.arccos(cosine_angle))
     return abs(90.0 - angle)
 
-def calculate_head_tilt_fixed(left_eye, right_eye):
+def calculate_head_tilt(left_eye, right_eye):
     dx = right_eye[0] - left_eye[0]
     dy = right_eye[1] - left_eye[1]
     if abs(dx) < 1e-6: return 0.0
@@ -88,6 +88,6 @@ def extract_features_31(kpts, w, h):
     
     features.append(np.mean(confs))
     features.append(neck_angle * face_ratio)
-    features.append(calculate_head_tilt_fixed(le, re))
+    features.append(calculate_head_tilt(le, re))
     
     return features
