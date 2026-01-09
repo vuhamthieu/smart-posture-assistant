@@ -1,2 +1,3 @@
 # smart-posture-assistant
-test OTA
+test version
+
