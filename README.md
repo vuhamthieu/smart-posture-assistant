@@ -1,3 +1,3 @@
 # smart-posture-assistant
-test version
+test version 2
 
