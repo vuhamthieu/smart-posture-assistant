@@ -388,6 +388,12 @@ def detect_posture():
     
     status_buf = deque(maxlen=5); last_bad=0; last_alert=0; fps_frame_cnt=0; fps_start_time=time.time()
     last_final_status = None 
+    frame_idx = 0
+    last_kpts = None
+    last_raw_status = "Init"
+    last_method = "Init"
+    last_debug_msg = ""
+    last_detected_type = ""
     
     while True:
         if not cap.isOpened(): time.sleep(1); continue
@@ -395,89 +401,108 @@ def detect_posture():
         if not ret: continue
         
         stream_frame = cv2.resize(frame, (640, 480))
+        h, w, _ = frame.shape
 
-        img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (in_w, in_h))
-        input_data = np.expand_dims(img, axis=0) if input_dtype == np.uint8 else np.expand_dims((img.astype(np.float32)-127.5)/127.5, axis=0)
+        run_inference = (frame_idx % 2 == 0)
         
-        interpreter.set_tensor(input_details[0]['index'], input_data); interpreter.invoke()
-        kpts = interpreter.get_tensor(output_details[0]['index'])[0][0]
-        
-        h, w, _ = frame.shape; raw_status="Good"; method="Init"; conf=0.0; angle=0.0; dist_stat="OK"; debug_msg=""
+        if run_inference:
+            img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (in_w, in_h))
+            input_data = np.expand_dims(img, axis=0) if input_dtype == np.uint8 else np.expand_dims((img.astype(np.float32)-127.5)/127.5, axis=0)
+            
+            interpreter.set_tensor(input_details[0]['index'], input_data); interpreter.invoke()
+            kpts = interpreter.get_tensor(output_details[0]['index'])[0][0]
+            last_kpts = kpts
+        else:
+            kpts = last_kpts
+
+        raw_status = last_raw_status
+        method = last_method
+        debug_msg = last_debug_msg
+        detected_type = last_detected_type
         
         NECK_SHRINK_TOLERANCE = config_mgr.get('neck_threshold', 35.0) / 100.0 * 2.0
         if NECK_SHRINK_TOLERANCE > 1.0 or NECK_SHRINK_TOLERANCE < 0.5: NECK_SHRINK_TOLERANCE = 0.70
         NOSE_DROP_THRESHOLD = config_mgr.get('nose_drop_threshold', 0.25)
 
-        if not is_calibrated:
-            if validate_keypoints(kpts):
-                face_w = np.linalg.norm(np.array([kpts[3][1], kpts[3][0]]) - np.array([kpts[4][1], kpts[4][0]]))
-                neck_h = (kpts[5][0] + kpts[6][0]) / 2 - kpts[0][0]
-                ear_y = (kpts[3][0] + kpts[4][0]) / 2; nose_y = kpts[0][0]
-                nose_ear_val = nose_y - ear_y
-                if face_w > 0:
-                    calib_neck.append(neck_h / face_w)
-                    calib_nose.append(nose_ear_val / face_w)
-                msg = f"CALIB... {int(len(calib_neck)/CALIBRATION_FRAMES*100)}%"
-                
-                cv2.putText(stream_frame, "SIT STRAIGHT", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-                cv2.putText(stream_frame, msg, (20, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
-                
-                if len(calib_neck) >= CALIBRATION_FRAMES:
-                    base_neck_ratio = np.mean(calib_neck)
-                    base_nose_ear_diff = np.mean(calib_nose)
-                    is_calibrated = True
-                    speak_alert("close")
-            else:
-                cv2.putText(stream_frame, "NO PERSON", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-            
-            with lock: outputFrame = stream_frame.copy(); continue
-
-        if validate_keypoints(kpts):
-            try:
-                feats = extract_features_31(kpts, w, h); angle = feats[21]
-                
-                face_w = np.linalg.norm(np.array([kpts[3][1], kpts[3][0]]) - np.array([kpts[4][1], kpts[4][0]]))
-                neck_h = (kpts[5][0] + kpts[6][0]) / 2 - kpts[0][0]
-                ear_y = (kpts[3][0] + kpts[4][0]) / 2; nose_y = kpts[0][0]
-                
-                current_nose_diff = (nose_y - ear_y) / (face_w + 1e-6)
-                curr_neck_ratio = neck_h / (face_w + 1e-6)
-                neck_change = curr_neck_ratio / (base_neck_ratio + 1e-6)
-                nose_drop_amount = current_nose_diff - base_nose_ear_diff
-                
-                phys_label = "Good"; is_bad_posture = False; detected_type = ""
-                
-                if neck_change < NECK_SHRINK_TOLERANCE:
-                    if nose_drop_amount > NOSE_DROP_THRESHOLD: 
-                        phys_label = "Lean(Nose)"; is_bad_posture = True; detected_type = "lean"
-                    else:
-                        phys_label = "Hunch(Neck)"; is_bad_posture = True; detected_type = "hunch"
-                
-                ai_label = "None"; ai_conf = 0.0
-                if use_ml_model:
-                    X_in = posture_scaler.transform([feats])
-                    ai_label = posture_model.predict(X_in)[0]
-                    ai_conf = 0.9 
-                
-                if use_ml_model:
-                    if ai_label == 'tilt' and ai_conf > 0.7:
-                        raw_status = "Bad"; detected_type = "tilt"; method = f"AI_Tilt({ai_conf:.2f})"
-                    elif is_bad_posture:
-                        raw_status = "Bad"; method = phys_label
-                    elif ai_conf > 0.7 and ai_label != 'good':
-                        raw_status = "Bad"; detected_type = ai_label; method = f"AI_{ai_label}"
-                    elif angle <= 15.0:
-                        raw_status = "Good"; method = f"Safe({angle:.1f})"
-                    else:
-                        raw_status = "Good"
+        if kpts is not None:
+            if not is_calibrated:
+                if validate_keypoints(kpts):
+                    if run_inference:
+                        face_w = np.linalg.norm(np.array([kpts[3][1], kpts[3][0]]) - np.array([kpts[4][1], kpts[4][0]]))
+                        neck_h = (kpts[5][0] + kpts[6][0]) / 2 - kpts[0][0]
+                        ear_y = (kpts[3][0] + kpts[4][0]) / 2; nose_y = kpts[0][0]
+                        nose_ear_val = nose_y - ear_y
+                        if face_w > 0:
+                            calib_neck.append(neck_h / face_w)
+                            calib_nose.append(nose_ear_val / face_w)
+                        if len(calib_neck) >= CALIBRATION_FRAMES:
+                            base_neck_ratio = np.mean(calib_neck)
+                            base_nose_ear_diff = np.mean(calib_nose)
+                            is_calibrated = True
+                            speak_alert("close")
+                    
+                    msg = f"CALIB... {int(len(calib_neck)/CALIBRATION_FRAMES*100)}%"
+                    cv2.putText(stream_frame, "SIT STRAIGHT", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+                    cv2.putText(stream_frame, msg, (20, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
                 else:
-                    if is_bad_posture: raw_status = "Bad"; method = phys_label
+                    cv2.putText(stream_frame, "NO PERSON", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
                 
-                debug_msg = f"N:{neck_change:.2f} D:{nose_drop_amount:.2f}"
-                log_data(phys_label, ai_label, ai_conf, raw_status, neck_change, nose_drop_amount, angle)
+                with lock: outputFrame = stream_frame.copy()
+                frame_idx += 1
+                continue
 
-            except: method="Err"
-        else: method="NoPerson"
+            if validate_keypoints(kpts):
+                if run_inference:
+                    try:
+                        feats = extract_features_31(kpts, w, h); angle = feats[21]
+                        
+                        face_w = np.linalg.norm(np.array([kpts[3][1], kpts[3][0]]) - np.array([kpts[4][1], kpts[4][0]]))
+                        neck_h = (kpts[5][0] + kpts[6][0]) / 2 - kpts[0][0]
+                        ear_y = (kpts[3][0] + kpts[4][0]) / 2; nose_y = kpts[0][0]
+                        
+                        current_nose_diff = (nose_y - ear_y) / (face_w + 1e-6)
+                        curr_neck_ratio = neck_h / (face_w + 1e-6)
+                        neck_change = curr_neck_ratio / (base_neck_ratio + 1e-6)
+                        nose_drop_amount = current_nose_diff - base_nose_ear_diff
+                        
+                        phys_label = "Good"; is_bad_posture = False; detected_type = ""
+                        
+                        if neck_change < NECK_SHRINK_TOLERANCE:
+                            if nose_drop_amount > NOSE_DROP_THRESHOLD: 
+                                phys_label = "Lean(Nose)"; is_bad_posture = True; detected_type = "lean"
+                            else:
+                                phys_label = "Hunch(Neck)"; is_bad_posture = True; detected_type = "hunch"
+                        
+                        ai_label = "None"; ai_conf = 0.0
+                        if use_ml_model:
+                            X_in = posture_scaler.transform([feats])
+                            ai_label = posture_model.predict(X_in)[0]
+                            ai_conf = 0.9 
+                        
+                        if use_ml_model:
+                            if ai_label == 'tilt' and ai_conf > 0.7:
+                                raw_status = "Bad"; detected_type = "tilt"; method = f"AI_Tilt({ai_conf:.2f})"
+                            elif is_bad_posture:
+                                raw_status = "Bad"; method = phys_label
+                            elif ai_conf > 0.7 and ai_label != 'good':
+                                raw_status = "Bad"; detected_type = ai_label; method = f"AI_{ai_label}"
+                            elif angle <= 15.0:
+                                raw_status = "Good"; method = f"Safe({angle:.1f})"
+                            else:
+                                raw_status = "Good"
+                        else:
+                            if is_bad_posture: raw_status = "Bad"; method = phys_label
+                        
+                        debug_msg = f"N:{neck_change:.2f} D:{nose_drop_amount:.2f}"
+                        last_raw_status = raw_status
+                        last_method = method
+                        last_debug_msg = debug_msg
+                        last_detected_type = detected_type
+                        
+                        log_data(phys_label, ai_label, ai_conf, raw_status, neck_change, nose_drop_amount, angle)
+
+                    except: method="Err"
+            else: method="NoPerson"
         
         status_buf.append(raw_status)
         final_status = "Bad" if status_buf.count("Bad") >= 3 else "Good"
@@ -505,7 +530,7 @@ def detect_posture():
         else:
             last_bad=0
             
-        if fps_frame_cnt%2==0:
+        if fps_frame_cnt % 2 == 0:
             cv2.putText(stream_frame, f"Stat:{final_status}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255) if final_status=="Bad" else (0,255,0), 2)
             cv2.putText(stream_frame, f"{method}", (10,70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 1)
             cv2.putText(stream_frame, debug_msg, (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 1)
@@ -518,6 +543,7 @@ def detect_posture():
         
         stats['posture_status'] = final_status
         with lock: outputFrame = stream_frame.copy()
+        frame_idx += 1
 
 def generate():
     global outputFrame
