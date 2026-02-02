@@ -1,5 +1,10 @@
 # Smart AIoT Posture Assistant
 
+![Status](https://img.shields.io/badge/status-active-success)
+![Platform](https://img.shields.io/badge/platform-Raspberry_Pi_4-lightgrey)
+![Python](https://img.shields.io/badge/python-3.9-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 Smart AIoT Posture Assistant is a real-time, edge-first posture monitoring system for seated users. It detects and classifies sitting postures using TensorFlow Lite MoveNet for pose estimation and a machine-learning classifier for posture recognition, designed for strong generalization to new, unseen users.
 
 ## Overview
@@ -7,6 +12,18 @@ Smart AIoT Posture Assistant is a real-time, edge-first posture monitoring syste
 **Problem:** Poor sitting posture contributes to back pain and reduced productivity. Many solutions are intrusive, cloud-dependent, or expensive.
 
 **Solution:** A non-invasive, camera-based assistant that runs entirely on edge hardware (Raspberry Pi 4). It performs local pose estimation, engineered-feature extraction, and posture classification, then provides immediate feedback via LEDs, OLED display, voice alerts, and a local web interface.
+
+## Table of Contents
+- [Key Features](#key-features)
+- [System Architecture](#system-architecture)
+- [Technology Stack](#technology-stack)
+- [AI & Data Processing](#ai--data-processing)
+- [Dataset & Data Collection](#dataset--data-collection)
+- [Getting Started](#getting-started)
+- [Results and Performance](#results-and-performance)
+- [Performance & Resource Usage](#performance--resource-usage)
+- [Project Structure](#project-structure)
+
 
 ## Key Features
 
@@ -27,6 +44,13 @@ Smart AIoT Posture Assistant is a real-time, edge-first posture monitoring syste
 4. Classifier predicts posture using those features.
 5. Feedback is delivered via LEDs, OLED, voice alerts, and the web UI.
 
+### System Block Diagram
+
+<img width="627" height="564" alt="image" src="https://github.com/user-attachments/assets/187ef250-d16d-4616-963f-8da5da830eac" />
+
+End-to-end edge pipeline from camera capture, pose estimation,
+feature engineering, posture classification to multi-modal feedback.
+
 ## Technology Stack
 
 **AI / ML**
@@ -46,7 +70,7 @@ Smart AIoT Posture Assistant is a real-time, edge-first posture monitoring syste
 - WS2812/WS281x RGB LED Ring (12 LEDs)
 - USB Microphone (e.g., MI-305)
 - MAX98357 audio amplifier + 8Ω 3W speaker
-- Li-ion 18650 battery + TP4056 charger + MT3608 boost (3.7V→5V)
+- Li-ion 18650 battery + TP4056 charger + MT3608 boost (3.7V→5V) (only for LED Ring)
 
 **Evaluation**
 - Leave-One-Group-Out (LOGO) Cross-Validation
@@ -60,7 +84,7 @@ Smart AIoT Posture Assistant is a real-time, edge-first posture monitoring syste
 
 ## Dataset & Data Collection
 
-Data collection is handled by the web tool in [src/collect_data.py](src/collect_data.py). Frames are processed on-device and keypoints are saved directly to CSV; images/videos are not stored.
+Data collection is handled by the web tool in (src/collect_data.py). Frames are processed on-device and keypoints are saved directly to CSV; images/videos are not stored.
 
 - Output file: `posture_dataset_v2.csv`
 - Columns: `label`, `person_id`, then 17×3 values per keypoint (y, x, confidence)
@@ -172,15 +196,29 @@ journalctl -u posture-assistant.service -f
 - Feature engineering improves Balanced Accuracy by ~19% vs raw keypoints.
 - Raspberry Pi 4: near real-time CPU inference (`num_threads=2`).
 
+### Ablation Study
+
+| Configuration | Balanced Accuracy |
+|--------------|-------------------|
+| Raw keypoints only | 66.7% |
+| Engineered features (31, single model) | 84.6% |
+| Remove top-5 features | 78.1% |
+| Ensemble (full system) | **85.9%** |
+
+**Key Insights:**
+- Feature engineering contributes **~19% absolute improvement**.
+- Top-5 geometric features account for **~7.8% accuracy gain**.
+- Ensemble improves robustness across unseen users compared to single models.
+
 ## Performance & Resource Usage
 
 Typical on Raspberry Pi 4 (CPU-only, MoveNet `num_threads=2`):
-- **End-to-end FPS:** ~10–12 FPS
+- **End-to-end FPS:** ~10–14 FPS
 - **Inference latency (MoveNet):** ~30–40 ms/frame
 - **Pipeline latency:** ~100–150 ms (capture → pose → classify → render)
-- **CPU load:** ~60–85% across cores during continuous operation
-- **Memory footprint:** ~250–400 MB (depends on services enabled)
-- **Device temperature:** ~55–70°C under sustained load
+- **CPU Load:** ~120% (≈1.2 cores utilized, ~67% idle)
+- **Memory footprint:** ~**~424 MiB**  Out of 4GB RAM
+- **Device temperature:** ~50–58°C under sustained load
 
 ## Project Structure
 
@@ -212,19 +250,22 @@ smart-posture-assistant/
 
 ## Future Enhancements
 
-- Integrate external web UI repository for richer dashboard and controls.
-- Optional ensemble classifier (Voting with RandomForest/XGBoost/GB) for further robustness.
-- Mobile companion app for remote monitoring and analytics.
-- Multi-user profiles and automatic recognition.
+- Detect user emotional states and cognitive status through multimodal analysis.
+- Multi-user profiles and automatic recognition (Classroom, Office use,...)
 - Temporal modeling (sequence analysis) for fatigue detection.
 - Edge TPU/CUDA acceleration where available.
+- Smart Home Integration
 
 ## Demo Media
 
-- Hardware setup photo: 
-- Live dashboard screenshot: 
-- Demo Videos: 
+- Demo Videos: https://youtu.be/O5sq4FfQQvA
 
 ## Web Frontend 
 
 - Web repo: https://github.com/vuhamthieu/posture-dashboard
+
+## Author
+
+This project was designed, implemented, and evaluated by:
+
+**Vũ Hạm Thiều** 
