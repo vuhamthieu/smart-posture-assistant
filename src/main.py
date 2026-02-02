@@ -97,7 +97,7 @@ cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1024)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 768)
 cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
 cap.set(cv2.CAP_PROP_EXPOSURE, 120)
-cap.set(cv2.CAP_PROP_FPS, 10)
+cap.set(cv2.CAP_PROP_FPS, 30)
 
 def cleanup_camera():
     if 'cap' in globals() and cap.isOpened():
@@ -175,18 +175,6 @@ atexit.register(cleanup)
 
 def log_data(phys_lbl, ai_lbl, ai_conf, final_res, neck_val, nose_val, angle):
     global last_upload_time, last_upload_status
-    
-    try:
-        if not os.path.exists(LOG_FILE):
-            with open(LOG_FILE, 'w', newline='') as f:
-                csv.writer(f).writerow(['Timestamp', 'Phys_Label', 'AI_Label', 'AI_Conf', 'Final_Result', 'Neck_Change', 'Nose_Drop'])
-        with open(LOG_FILE, 'a', newline='') as f:
-            csv.writer(f).writerow([
-                datetime.now().strftime("%H:%M:%S.%f")[:-3],
-                phys_lbl, ai_lbl, f"{ai_conf:.2f}", final_res,
-                f"{neck_val:.2f}", f"{nose_val:.2f}"
-            ])
-    except: pass
     
     upload_type = "Good"
     ai_clean = str(ai_lbl).lower().strip()
@@ -398,14 +386,16 @@ calib_nose = []
 def detect_posture():
     global outputFrame, cap, base_neck_ratio, base_nose_ear_diff, is_calibrated, calib_neck, calib_nose
     
-    status_buf = deque(maxlen=5); last_bad=0; last_alert=0; frame_cnt=0; start_t=time.time()
+    status_buf = deque(maxlen=5); last_bad=0; last_alert=0; fps_frame_cnt=0; fps_start_time=time.time()
+    last_final_status = None 
     
     while True:
         if not cap.isOpened(): time.sleep(1); continue
         ret, frame = cap.read()
         if not ret: continue
-        frame_cnt += 1
         
+        stream_frame = cv2.resize(frame, (640, 480))
+
         img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (in_w, in_h))
         input_data = np.expand_dims(img, axis=0) if input_dtype == np.uint8 else np.expand_dims((img.astype(np.float32)-127.5)/127.5, axis=0)
         
@@ -428,16 +418,19 @@ def detect_posture():
                     calib_neck.append(neck_h / face_w)
                     calib_nose.append(nose_ear_val / face_w)
                 msg = f"CALIB... {int(len(calib_neck)/CALIBRATION_FRAMES*100)}%"
-                cv2.putText(frame, "SIT STRAIGHT", (20, h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-                cv2.putText(frame, msg, (20, h//2+40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+                
+                cv2.putText(stream_frame, "SIT STRAIGHT", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+                cv2.putText(stream_frame, msg, (20, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+                
                 if len(calib_neck) >= CALIBRATION_FRAMES:
                     base_neck_ratio = np.mean(calib_neck)
                     base_nose_ear_diff = np.mean(calib_nose)
                     is_calibrated = True
                     speak_alert("close")
             else:
-                cv2.putText(frame, "NO PERSON", (50, h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-            with lock: outputFrame = frame.copy(); continue
+                cv2.putText(stream_frame, "NO PERSON", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+            
+            with lock: outputFrame = stream_frame.copy(); continue
 
         if validate_keypoints(kpts):
             try:
@@ -464,7 +457,7 @@ def detect_posture():
                 if use_ml_model:
                     X_in = posture_scaler.transform([feats])
                     ai_label = posture_model.predict(X_in)[0]
-                    ai_conf = np.max(posture_model.predict_proba(X_in)[0])
+                    ai_conf = 0.9 
                 
                 if use_ml_model:
                     if ai_label == 'tilt' and ai_conf > 0.7:
@@ -489,13 +482,20 @@ def detect_posture():
         status_buf.append(raw_status)
         final_status = "Bad" if status_buf.count("Bad") >= 3 else "Good"
         
+        if final_status != last_final_status:
+            if final_status == "Bad":
+                bad_color = config_mgr.get('led_color_bad', [255, 0, 0])
+                if not study_timer.is_running: 
+                    led_controller.set_color_array(bad_color)
+                    face_display.draw_angry() 
+            else:
+                good_color = config_mgr.get('led_color_good', [0, 255, 0])
+                if not study_timer.is_running:
+                    led_controller.set_color_array(good_color)
+                    face_display.draw_normal()
+            last_final_status = final_status
+
         if final_status == "Bad":
-            bad_color = config_mgr.get('led_color_bad', [255, 0, 0])
-            
-            if not study_timer.is_running: 
-                led_controller.set_color_array(bad_color)
-                face_display.draw_angry() 
-            
             if time.time()-last_bad>1.5:
                 if time.time()-last_alert>8:
                     speak_alert(detected_type if detected_type else 'lean')
@@ -503,30 +503,40 @@ def detect_posture():
             else:
                 if last_bad==0: last_bad=time.time()
         else:
-            good_color = config_mgr.get('led_color_good', [0, 255, 0])
-            
-            if not study_timer.is_running:
-                led_controller.set_color_array(good_color)
-                face_display.draw_normal(); 
-            
             last_bad=0
             
-        if frame_cnt%2==0:
-            cv2.putText(frame, f"Stat:{final_status}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255) if final_status=="Bad" else (0,255,0), 2)
-            cv2.putText(frame, f"{method}", (10,70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 1)
-            cv2.putText(frame, debug_msg, (10, h-20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 1)
+        if fps_frame_cnt%2==0:
+            cv2.putText(stream_frame, f"Stat:{final_status}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255) if final_status=="Bad" else (0,255,0), 2)
+            cv2.putText(stream_frame, f"{method}", (10,70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 1)
+            cv2.putText(stream_frame, debug_msg, (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 1)
             
-        elapsed = time.time()-start_t; fps = frame_cnt/elapsed if elapsed>0 else 0
-        stats.update({'posture_status': final_status, 'fps': round(fps,1)})
-        with lock: outputFrame = frame.copy()
+        fps_frame_cnt += 1
+        if time.time() - fps_start_time >= 1.0:
+            stats['fps'] = fps_frame_cnt
+            fps_frame_cnt = 0
+            fps_start_time = time.time()
+        
+        stats['posture_status'] = final_status
+        with lock: outputFrame = stream_frame.copy()
 
 def generate():
     global outputFrame
     while True:
+        frame_to_encode = None
         with lock:
-            if outputFrame is None: time.sleep(0.01); continue
-            _, buf = cv2.imencode('.jpg', outputFrame)
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + bytearray(buf) + b'\r\n')
+            if outputFrame is None:
+                time.sleep(0.01)
+                continue
+            frame_to_encode = outputFrame
+        
+        if frame_to_encode is not None:
+            flag, buf = cv2.imencode('.jpg', frame_to_encode)
+            if flag:
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + bytearray(buf) + b'\r\n')
+            else:
+                time.sleep(0.01)
+        else:
+            time.sleep(0.01)
 
 @app.route("/video_feed")
 def vf(): return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
