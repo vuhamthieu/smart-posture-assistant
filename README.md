@@ -235,7 +235,7 @@ smart-posture-assistant/
 ├── data/
 │   └── posture_data.csv         # Sample/legacy data
 ├── models/                      # Model artifacts (downloaded from Kaggle; large files not committed)
-├── api.py                       # OTA/remote management API
+├── update.sh                    # OTA/remote management
 ├── requirements.txt             # Python dependencies
 └── README.md
 ```
