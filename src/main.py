@@ -43,7 +43,6 @@ def no_alsa_error():
     except: yield
 
 CALIBRATION_FRAMES = 60
-LOG_FILE = "posture_log.csv"
 last_upload_time = 0
 last_upload_status = ""
 HEARTBEAT_INTERVAL = 15.0
@@ -52,12 +51,9 @@ print("Initializing Camera...")
 def auto_find_camera():
     dev_list = glob.glob('/dev/video*')
     dev_list.sort()
-    
     for dev_path in dev_list:
-        try:
-            dev_id = int(dev_path.replace('/dev/video', ''))
+        try: dev_id = int(dev_path.replace('/dev/video', ''))
         except: continue
-
         print(f"{YELLOW}Checking {dev_path}...{RESET}", end=" ")
         temp_cap = cv2.VideoCapture(dev_id)
         if temp_cap.isOpened():
@@ -80,18 +76,15 @@ def reset_camera_driver():
 
 print(f"{YELLOW}Initializing...{RESET}")
 found_id = auto_find_camera()
-
 if found_id is None:
     reset_camera_driver()
     found_id = auto_find_camera()
-
 if found_id is None:
     print(f"{RED}CRITICAL ERROR: No camera hardware detected.{RESET}")
     exit(1)
 
 print(f"{GREEN}Selected Camera ID: {found_id}{RESET}")
 cap = cv2.VideoCapture(found_id)
-
 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1024)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 768)
@@ -103,7 +96,6 @@ def cleanup_camera():
     if 'cap' in globals() and cap.isOpened():
         print(f"\n{YELLOW}Releasing camera resource...{RESET}")
         cap.release()
-
 atexit.register(cleanup_camera)
 
 if not cap.isOpened():
@@ -112,6 +104,7 @@ else:
     w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     print(f"{GREEN}Camera Started: {int(w)}x{int(h)}{RESET}")
+
 try: from tflite_runtime.interpreter import Interpreter
 except: from tensorflow.lite.python.interpreter import Interpreter
 
@@ -162,38 +155,29 @@ except Exception as e:
 
 def cleanup():
     if oled:
-        try:
-            oled.fill(0); oled.show()
+        try: oled.fill(0); oled.show()
         except: pass
     if strip:
         try:
             for i in range(LED_COUNT): strip.setPixelColor(i, Color(0,0,0))
             strip.show()
         except: pass
-
 atexit.register(cleanup)
 
 def log_data(phys_lbl, ai_lbl, ai_conf, final_res, neck_val, nose_val, angle):
     global last_upload_time, last_upload_status
-    
     upload_type = "Good"
     ai_clean = str(ai_lbl).lower().strip()
     phys_clean = str(phys_lbl).lower()
 
     if final_res == "Bad":
-        if 'tilt' in ai_clean:
-            upload_type = "Tilt"
-        elif "lean" in phys_clean or "lean" in ai_clean:
-            upload_type = "Lean"
-        elif "hunch" in phys_clean or "hunch" in ai_clean:
-            upload_type = "Hunch"
-        else:
-            upload_type = "Hunch"
+        if 'tilt' in ai_clean: upload_type = "Tilt"
+        elif "lean" in phys_clean or "lean" in ai_clean: upload_type = "Lean"
+        elif "hunch" in phys_clean or "hunch" in ai_clean: upload_type = "Hunch"
+        else: upload_type = "Hunch"
     
     current_time = time.time()
-    
     is_status_changed = (upload_type != last_upload_status)
-    
     is_heartbeat_time = (current_time - last_upload_time > HEARTBEAT_INTERVAL)
 
     if is_status_changed or is_heartbeat_time:
@@ -205,7 +189,6 @@ def log_data(phys_lbl, ai_lbl, ai_conf, final_res, neck_val, nose_val, angle):
         threading.Thread(target=config_mgr.upload_record, 
                          args=(upload_type, ai_conf,metrics_data), 
                          daemon=True).start()
-        
         last_upload_time = current_time
         last_upload_status = upload_type
 
@@ -233,7 +216,9 @@ class StudyTimer:
 study_timer = StudyTimer()
 
 class LEDController:
-    def __init__(self, strip): self.strip = strip; self.lock = threading.Lock()
+    def __init__(self, strip): 
+        self.strip = strip; self.lock = threading.Lock()
+        self.stop_event = threading.Event()
     
     def set_color_array(self, color_array):
         if not self.strip: return
@@ -244,24 +229,42 @@ class LEDController:
                 self.strip.show()
         except: pass
 
+    def stop_pulsing(self):
+        self.stop_event.set()
+
     def pulse_while_speaking(self, color_array, duration=3):
         if not self.strip: return
+        self.stop_event.clear()
         start = time.time()
         r, g, b = color_array if len(color_array) == 3 else [255, 0, 0]
         dim_r, dim_g, dim_b = int(r*0.2), int(g*0.2), int(b*0.2)
         
         while time.time() - start < duration:
+            if self.stop_event.is_set(): break
             self.set_color_array([r, g, b])
-            time.sleep(0.2)
+            for _ in range(2): 
+                if self.stop_event.is_set(): break
+                time.sleep(0.1)
+            
+            if self.stop_event.is_set(): break
             self.set_color_array([dim_r, dim_g, dim_b])
-            time.sleep(0.2)
+            for _ in range(2):
+                if self.stop_event.is_set(): break
+                time.sleep(0.1)
+        
+        if not study_timer.is_running:
+            final_status = stats.get('posture_status', 'Good')
+            if final_status == 'Bad':
+                target = config_mgr.get('led_color_bad', [255, 0, 0])
+            else:
+                target = config_mgr.get('led_color_good', [0, 255, 0])
+            self.set_color_array(target)
 
 led_controller = LEDController(strip)
 
 class FaceDisplay:
     def __init__(self, oled, lock):
         self.oled = oled; self.lock = lock
-    
     def _draw(self, func):
         if not self.oled: return
         with self.lock:
@@ -323,16 +326,13 @@ class FaceDisplay:
 
     def draw_timer(self, txt): 
         try:
-            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 25)
-            self._draw(lambda d: d.text((25, 18), txt, font=font, fill=255))
-            
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+            self._draw(lambda d: d.text((20, 15), txt, font=font, fill=255))
         except IOError:
-            print("Use default font")
             self._draw(lambda d: d.text((45, 25), txt, fill=255))
 
 face_display = FaceDisplay(oled, oled_lock)
-if oled: 
-    face_display.draw_normal()
+if oled: face_display.draw_normal()
 
 TTS_CACHE_DIR = "/tmp/tts_cache"; os.makedirs(TTS_CACHE_DIR, exist_ok=True)
 
@@ -368,8 +368,12 @@ def speak_alert(key):
 def timer_updater():
     last = 0
     while True:
-        if study_timer.update(): speak_alert('close')
-        if study_timer.is_running and time.time()-last>=1: face_display.draw_timer(study_timer.get_time_str()); last=time.time()
+        if study_timer.is_running:
+            if time.time()-last >= 1:
+                face_display.draw_timer(study_timer.get_time_str())
+                last = time.time()
+            if study_timer.update(): 
+                speak_alert('close')
         time.sleep(0.5)
 
 app = Flask(__name__)
@@ -386,14 +390,15 @@ calib_nose = []
 def detect_posture():
     global outputFrame, cap, base_neck_ratio, base_nose_ear_diff, is_calibrated, calib_neck, calib_nose
     
-    status_buf = deque(maxlen=5); last_bad=0; last_alert=0; fps_frame_cnt=0; fps_start_time=time.time()
+    status_buf = deque(maxlen=15) 
+    last_bad=0; last_alert=0; fps_frame_cnt=0; fps_start_time=time.time()
     last_final_status = None 
     frame_idx = 0
     last_kpts = None
-    last_raw_status = "Init"
-    last_method = "Init"
-    last_debug_msg = ""
-    last_detected_type = ""
+    last_raw_status = "Init"; last_method = "Init"; last_debug_msg = ""; last_detected_type = ""
+    current_led_color = None
+    last_icon_style = None
+    last_known_conf = 0.95
     
     while True:
         if not cap.isOpened(): time.sleep(1); continue
@@ -402,13 +407,11 @@ def detect_posture():
         
         stream_frame = cv2.resize(frame, (640, 480))
         h, w, _ = frame.shape
-
         run_inference = (frame_idx % 2 == 0)
         
         if run_inference:
             img = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (in_w, in_h))
             input_data = np.expand_dims(img, axis=0) if input_dtype == np.uint8 else np.expand_dims((img.astype(np.float32)-127.5)/127.5, axis=0)
-            
             interpreter.set_tensor(input_details[0]['index'], input_data); interpreter.invoke()
             kpts = interpreter.get_tensor(output_details[0]['index'])[0][0]
             last_kpts = kpts
@@ -419,7 +422,6 @@ def detect_posture():
         method = last_method
         debug_msg = last_debug_msg
         detected_type = last_detected_type
-        
         NECK_SHRINK_TOLERANCE = config_mgr.get('neck_threshold', 35.0) / 100.0 * 2.0
         if NECK_SHRINK_TOLERANCE > 1.0 or NECK_SHRINK_TOLERANCE < 0.5: NECK_SHRINK_TOLERANCE = 0.70
         NOSE_DROP_THRESHOLD = config_mgr.get('nose_drop_threshold', 0.25)
@@ -440,13 +442,11 @@ def detect_posture():
                             base_nose_ear_diff = np.mean(calib_nose)
                             is_calibrated = True
                             speak_alert("close")
-                    
                     msg = f"CALIB... {int(len(calib_neck)/CALIBRATION_FRAMES*100)}%"
                     cv2.putText(stream_frame, "SIT STRAIGHT", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
                     cv2.putText(stream_frame, msg, (20, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
                 else:
                     cv2.putText(stream_frame, "NO PERSON", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-                
                 with lock: outputFrame = stream_frame.copy()
                 frame_idx += 1
                 continue
@@ -455,16 +455,13 @@ def detect_posture():
                 if run_inference:
                     try:
                         feats = extract_features_31(kpts, w, h); angle = feats[21]
-                        
                         face_w = np.linalg.norm(np.array([kpts[3][1], kpts[3][0]]) - np.array([kpts[4][1], kpts[4][0]]))
                         neck_h = (kpts[5][0] + kpts[6][0]) / 2 - kpts[0][0]
                         ear_y = (kpts[3][0] + kpts[4][0]) / 2; nose_y = kpts[0][0]
-                        
                         current_nose_diff = (nose_y - ear_y) / (face_w + 1e-6)
                         curr_neck_ratio = neck_h / (face_w + 1e-6)
                         neck_change = curr_neck_ratio / (base_neck_ratio + 1e-6)
                         nose_drop_amount = current_nose_diff - base_nose_ear_diff
-                        
                         phys_label = "Good"; is_bad_posture = False; detected_type = ""
                         
                         if neck_change < NECK_SHRINK_TOLERANCE:
@@ -477,7 +474,12 @@ def detect_posture():
                         if use_ml_model:
                             X_in = posture_scaler.transform([feats])
                             ai_label = posture_model.predict(X_in)[0]
-                            ai_conf = 0.9 
+                            
+                            if frame_idx % 30 == 0:
+                                ai_conf = np.max(posture_model.predict_proba(X_in)[0])
+                                last_known_conf = ai_conf
+                            else:
+                                ai_conf = last_known_conf
                         
                         if use_ml_model:
                             if ai_label == 'tilt' and ai_conf > 0.7:
@@ -494,31 +496,46 @@ def detect_posture():
                             if is_bad_posture: raw_status = "Bad"; method = phys_label
                         
                         debug_msg = f"N:{neck_change:.2f} D:{nose_drop_amount:.2f}"
-                        last_raw_status = raw_status
-                        last_method = method
-                        last_debug_msg = debug_msg
-                        last_detected_type = detected_type
+                        last_raw_status = raw_status; last_method = method; last_debug_msg = debug_msg; last_detected_type = detected_type
                         
                         log_data(phys_label, ai_label, ai_conf, raw_status, neck_change, nose_drop_amount, angle)
-
                     except: method="Err"
             else: method="NoPerson"
         
-        status_buf.append(raw_status)
-        final_status = "Bad" if status_buf.count("Bad") >= 3 else "Good"
+        if run_inference:
+            status_buf.append(raw_status)
         
-        if final_status != last_final_status:
-            if final_status == "Bad":
-                bad_color = config_mgr.get('led_color_bad', [255, 0, 0])
-                if not study_timer.is_running: 
-                    led_controller.set_color_array(bad_color)
-                    face_display.draw_angry() 
-            else:
-                good_color = config_mgr.get('led_color_good', [0, 255, 0])
-                if not study_timer.is_running:
-                    led_controller.set_color_array(good_color)
-                    face_display.draw_normal()
-            last_final_status = final_status
+        final_status = "Bad" if status_buf.count("Bad") >= 10 else "Good"
+        stats['posture_status'] = final_status
+        
+        if not study_timer.is_running:
+            target_color_list = [0,0,0]
+            if final_status == "Bad": target_color_list = config_mgr.get('led_color_bad', [255, 0, 0])
+            else: target_color_list = config_mgr.get('led_color_good', [0, 255, 0])
+            
+            target_color_tuple = tuple(target_color_list)
+            target_icon_style = config_mgr.get('oled_icon_style', 'A')
+            
+            is_led_changed = (target_color_tuple != current_led_color)
+            is_status_changed = (final_status != last_final_status)
+            is_style_changed = (target_icon_style != last_icon_style)
+
+            if is_status_changed or is_led_changed:
+                if final_status == "Good": led_controller.stop_pulsing()
+                led_controller.set_color_array(target_color_list)
+                current_led_color = target_color_tuple
+            
+            if is_status_changed or is_style_changed:
+                if final_status == "Bad": face_display.draw_angry()
+                else: face_display.draw_normal()
+                last_final_status = final_status
+                last_icon_style = target_icon_style
+        else:
+            target_color_list = config_mgr.get('led_color_bad', [255, 0, 0]) if final_status == "Bad" else config_mgr.get('led_color_good', [0, 255, 0])
+            target_color_tuple = tuple(target_color_list)
+            if target_color_tuple != current_led_color:
+                led_controller.set_color_array(target_color_list)
+                current_led_color = target_color_tuple
 
         if final_status == "Bad":
             if time.time()-last_bad>1.5:
@@ -531,7 +548,8 @@ def detect_posture():
             last_bad=0
             
         if fps_frame_cnt % 2 == 0:
-            cv2.putText(stream_frame, f"Stat:{final_status}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255) if final_status=="Bad" else (0,255,0), 2)
+            color = (0,0,255) if final_status=="Bad" else (0,255,0)
+            cv2.putText(stream_frame, f"Stat:{final_status}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
             cv2.putText(stream_frame, f"{method}", (10,70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,0), 1)
             cv2.putText(stream_frame, debug_msg, (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 1)
             
@@ -541,7 +559,6 @@ def detect_posture():
             fps_frame_cnt = 0
             fps_start_time = time.time()
         
-        stats['posture_status'] = final_status
         with lock: outputFrame = stream_frame.copy()
         frame_idx += 1
 
@@ -550,19 +567,14 @@ def generate():
     while True:
         frame_to_encode = None
         with lock:
-            if outputFrame is None:
-                time.sleep(0.01)
-                continue
+            if outputFrame is None: time.sleep(0.01); continue
             frame_to_encode = outputFrame
         
         if frame_to_encode is not None:
-            flag, buf = cv2.imencode('.jpg', frame_to_encode)
-            if flag:
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + bytearray(buf) + b'\r\n')
-            else:
-                time.sleep(0.01)
-        else:
-            time.sleep(0.01)
+            flag, buf = cv2.imencode('.jpg', frame_to_encode, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            if flag: yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + bytearray(buf) + b'\r\n')
+            else: time.sleep(0.01)
+        else: time.sleep(0.01)
 
 @app.route("/video_feed")
 def vf(): return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
@@ -587,7 +599,6 @@ if __name__ == '__main__':
     config_mgr.start_polling()
     threading.Thread(target=detect_posture, daemon=True).start()
     threading.Thread(target=timer_updater, daemon=True).start()
-    
     try:
         with no_alsa_error():
             threading.Thread(target=voice_agent.voice_listener_loop, 
@@ -596,5 +607,4 @@ if __name__ == '__main__':
         print("Voice Thread Started")
     except Exception as e:
         print(f"Voice Error: {e}")
-
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
