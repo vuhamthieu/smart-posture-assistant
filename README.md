@@ -3,7 +3,6 @@
 ![Status](https://img.shields.io/badge/status-active-success)
 ![Platform](https://img.shields.io/badge/platform-Raspberry_Pi_4-lightgrey)
 ![Python](https://img.shields.io/badge/python-3.9-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
 
 Smart AIoT Posture Assistant is a real-time, edge-first posture monitoring system for seated users. It detects and classifies sitting postures using TensorFlow Lite MoveNet for pose estimation and a machine-learning classifier for posture recognition, designed for strong generalization to new, unseen users.
 
