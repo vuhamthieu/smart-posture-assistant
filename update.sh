@@ -1,11 +1,16 @@
 #!/bin/bash
 
-REPO_DIR="/home/theo/smart-posture-assistant"
-VENV_PYTHON="/home/theo/posture-env/bin/python"
-LOG_FILE="$REPO_DIR/update.log"
-ENV_FILE="$REPO_DIR/.env"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${REPO_DIR:-$SCRIPT_DIR}"
+VENV_PYTHON="${VENV_PYTHON:-$REPO_DIR/.venv/bin/python}"
+LOG_FILE="${LOG_FILE:-$REPO_DIR/update.log}"
+ENV_FILE="${ENV_FILE:-$REPO_DIR/.env}"
 
-if [ -f "$ENV_FILE" ]; then export $(grep -v '^#' "$ENV_FILE" | xargs); fi
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+fi
 DEVICE_ID=${DEVICE_ID:-"pi-posture-001"}
 
 update_db() {

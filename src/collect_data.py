@@ -6,13 +6,18 @@ import os
 import time
 import threading
 from flask import Flask, Response, request, jsonify, render_template_string
+from pathlib import Path
 
 try:
     from tflite_runtime.interpreter import Interpreter
 except ImportError:
     from tensorflow.lite.python.interpreter import Interpreter
 
-MODEL_PATH = "/home/theo/4.tflite"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_PATH = os.environ.get(
+    "TFLITE_MODEL_PATH",
+    str(PROJECT_ROOT / "4.tflite"),
+)
 DATA_FILE = "posture_dataset_v2.csv"
 CAMERA_ID = 0
 CONFIDENCE_THRESHOLD = 0.3

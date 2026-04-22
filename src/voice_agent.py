@@ -10,6 +10,7 @@ import pickle
 import numpy as np
 from contextlib import contextmanager
 from pyvi import ViTokenizer
+from pathlib import Path
 
 RED = "\033[91m"
 GREEN = "\033[92m"
@@ -35,17 +36,19 @@ def ignore_stderr():
         try:
             os.dup2(old_stderr, 2)
             os.close(old_stderr)
-        except: pass
+        except Exception: pass
 
-MODEL_PATH = "/home/theo/smart-posture-assistant/src/nlp_model.pkl"
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
+    DEFAULT_MODEL_PATH = Path(__file__).resolve().with_name('nlp_model.pkl')
+    MODEL_PATH = os.environ.get('NLP_MODEL_PATH', str(DEFAULT_MODEL_PATH))
 nlp_model = None
 
 try:
     with open(MODEL_PATH, 'rb') as f:
         nlp_model = pickle.load(f)
     print(f"{GREEN}[SYSTEM] NLP Model Loaded{RESET}")
-except:
-    print(f"{RED}[ERROR] NLP Model not found{RESET}")
+except Exception as e:
+    print(f"{RED}[ERROR] NLP Model load failed: {e}{RESET}")
 
 with ignore_stderr():
     recognizer = sr.Recognizer()
@@ -70,10 +73,10 @@ def get_target_mic_index():
 
 RESPONSES = {
     'check_status': ["để tôi xem nào...", "Đang kiểm tra tư thế."],
-    'start_timer': ["Ok, bắt đầu đếm giờ .", "Đã kích hoạt chế độ tập  trung."],
+    'start_timer': ["Ok, bắt đầu đếm giờ.", "Đã kích hoạt chế độ tập trung."],
     'stop_timer': ["Đã dừng đồng hồ.", "Ok, dừng tính giờ."],
-    'check_time': ["Thời gian còn lại là...", "Đang kiể tra thời gian còn lại"],
-    'greeting': ["Xin chào! cần tôi giúp gì không?", "Chao bạn!", "Hello bạn"],
+    'check_time': ["Thời gian còn lại là...", "Đang kiểm tra thời gian còn lại"],
+    'greeting': ["Xin chào! Cần tôi giúp gì không?", "Chào bạn!", "Hello bạn"],
     'unknown': ["Xin lỗi, tôi chưa hiểu.", "bạn nói lại được không?"]
 }
 
@@ -99,7 +102,7 @@ def predict_intent(text):
         intent = nlp_model.predict([processed_text])[0]
         print(f"{BLUE}[ANALYSIS] Input: '{text}' -> Tokenized: '{processed_text}' -> Intent: {intent}{RESET}")
         return intent
-    except: return "unknown"
+    except Exception: return "unknown"
 
 def execute_command(intent, current_stats, timer_obj):
     if intent in RESPONSES: speak_text(random.choice(RESPONSES[intent]))
@@ -107,7 +110,7 @@ def execute_command(intent, current_stats, timer_obj):
     if intent == 'check_status':
         status = current_stats.get('posture_status', 'Init')
         if status == 'Good': speak_text("Tư thế chuẩn, 10 điểm!")
-        elif status == 'Bad': speak_text("Ngồi thẳng lưng lê bạn ơi!")
+        elif status == 'Bad': speak_text("Ngồi thẳng lưng lên bạn ơi!")
         else: speak_text("Hệ thống đang khởi động.")
         
     elif intent == 'start_timer':
@@ -121,7 +124,7 @@ def execute_command(intent, current_stats, timer_obj):
             rem = timer_obj.remaining
             speak_text(f"Còn {int(rem//60)} phút {int(rem%60)} giây.")
         else:
-            speak_text("Đồng hô đang tắt.")
+            speak_text("Đồng hồ đang tắt.")
 
 def voice_listener_loop(led_ctrl, face_ctrl, stats_ref, timer_ref):
     global IS_BOT_SPEAKING

@@ -1,6 +1,7 @@
 import json
 import pickle
 import os
+from pathlib import Path
 from pyvi import ViTokenizer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import SGDClassifier
@@ -10,8 +11,11 @@ GREEN = "\033[92m"
 RED = "\033[91m"
 RESET = "\033[0m"
 
-MODEL_FILE = "/home/theo/smart-posture-assistant/src/nlp_model.pkl"
-DATA_FILE = "/home/theo/smart-posture-assistant/src/nlp_data.json"
+DEFAULT_MODEL_FILE = Path(__file__).resolve().with_name('nlp_model.pkl')
+DEFAULT_DATA_FILE = Path(__file__).resolve().with_name('nlp_data.json')
+
+MODEL_FILE = os.environ.get('NLP_MODEL_PATH', str(DEFAULT_MODEL_FILE))
+DATA_FILE = os.environ.get('NLP_DATA_PATH', str(DEFAULT_DATA_FILE))
 
 def preprocess(text):
     return ViTokenizer.tokenize(text.lower())
