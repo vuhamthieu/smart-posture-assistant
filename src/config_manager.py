@@ -2,24 +2,44 @@ import os
 import time
 import threading
 import subprocess
-from supabase import create_client
-from dotenv import load_dotenv
+import importlib
 from pathlib import Path 
 
-env_path = Path('/home/theo/smart-posture-assistant/.env')
-load_dotenv(dotenv_path=env_path)
+from api_client import PostureIngestClient
+
+def _optional_import(module_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except Exception:
+        return None
+
+
+_dotenv = _optional_import("dotenv")
+load_dotenv = getattr(_dotenv, "load_dotenv", None) if _dotenv else None
+
+_supabase = _optional_import("supabase")
+create_client = getattr(_supabase, "create_client", None) if _supabase else None
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+env_path = PROJECT_ROOT / '.env'
+if load_dotenv:
+    load_dotenv(dotenv_path=env_path)
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 DEVICE_ID = os.environ.get("DEVICE_ID", "pi-posture-001")
 
-UPDATE_SCRIPT_PATH = "/home/theo/smart-posture-assistant/update.sh"
+UPDATE_SCRIPT_PATH = os.environ.get(
+    "UPDATE_SCRIPT_PATH",
+    str(PROJECT_ROOT / "update.sh"),
+)
 
 class ConfigManager:
     def __init__(self):
         self.client = None
         self.current_user_id = None
+        self.ingest_client = PostureIngestClient(device_id=DEVICE_ID)
         
         self.config = {
             "neck_threshold": 35.0,
@@ -50,7 +70,7 @@ class ConfigManager:
         }
         self.lock = threading.Lock()
         
-        if SUPABASE_URL and SUPABASE_KEY:
+        if create_client and SUPABASE_URL and SUPABASE_KEY:
             try:
                 self.client = create_client(SUPABASE_URL, SUPABASE_KEY)
                 print(f"Config Connected to Supabase (Device: {DEVICE_ID})")
@@ -59,29 +79,18 @@ class ConfigManager:
                 print(f"Config Connection failed: {e}")
 
     def upload_record(self, posture_type, confidence, metrics=None):
-        if not self.client or not self.current_user_id:
-            return
-
-        type_mapping = {
-            "Good": "good",
-            "Lean": "leaning",
-            "Hunch": "slouching",
-            "Tilt": "tilt" 
-        }
-        
-        db_posture_type = type_mapping.get(posture_type, posture_type.lower())
-        if posture_type == "Good": db_posture_type = "good"
-
+        # Deprecated: device should no longer write directly to Supabase.
+        # Keep this method for backward compatibility, but route through
+        # the Next.js ingest API.
         try:
-            data = {
-                "user_id": self.current_user_id, 
-                "posture_type": db_posture_type,
-                "confidence": float(confidence),
-                "metrics": metrics if metrics else {}
-            }
-            self.client.table("posture_records").insert(data).execute()
+            self.ingest_client.send_posture_record(
+                posture_type=str(posture_type),
+                confidence=float(confidence),
+                metrics=metrics or {},
+                keypoints={},
+            )
         except Exception as e:
-            print(f"Error uploading: {e}")
+            print(f"Error uploading via ingest API: {e}")
 
     def get(self, key, default=None):
         with self.lock:
@@ -146,4 +155,10 @@ def _loop(mgr):
             
         time.sleep(5)
 
-config_mgr = ConfigManager()
+_config_mgr = None
+
+def get_config_mgr():
+    global _config_mgr
+    if _config_mgr is None:
+        _config_mgr = ConfigManager()
+    return _config_mgr
