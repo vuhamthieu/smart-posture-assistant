@@ -12,6 +12,9 @@ Smart AIoT Posture Assistant is a real-time, edge-first posture monitoring syste
 
 **Solution:** A non-invasive, camera-based assistant that runs entirely on edge hardware (Raspberry Pi 4). It performs local pose estimation, engineered-feature extraction, and posture classification, then provides immediate feedback via LEDs, OLED display, voice alerts, and a local web interface.
 
+## Media
+<img width="754" height="770" alt="image" src="https://github.com/user-attachments/assets/12daaf9d-d999-4396-8005-42775d9da14d" />
+
 ## Table of Contents
 - [Key Features](#key-features)
 - [System Architecture](#system-architecture)
